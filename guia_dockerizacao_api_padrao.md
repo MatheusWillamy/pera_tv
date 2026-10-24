@@ -276,4 +276,7 @@ curl http://localhost:8000/health
 | **Falha de Healthcheck no contêiner slim** | Imagens `slim` não incluem utilitários `curl` ou `wget` | Healthcheck via comando inline Python: `python -c "import urllib.request; ..."` |
 | **Container não responde na porta mapeada** | Aplicação Uvicorn escutando em `127.0.0.1` | Inicializar com `--host 0.0.0.0` |
 | **Traefik do Easypanel não roteia o domínio** | Contêiner isolado em rede bridge default sem acesso à rede do Easypanel | Adicionar `networks: [default, easypanel]` com `external: true` |
+| **Aviso: container_name is used in...** | `container_name` fixo impede zero-downtime deploys e causa conflitos no Easypanel | Omitir `container_name` e utilizar o nome do serviço para resolução DNS interna |
+| **Aviso: ports is used in...** | `ports` faz bind direto no host e colide com outros serviços na VPS | Omitir `ports:` e manter apenas `expose: ["8000"]`, pois o Traefik faz o roteamento interno |
 | **n8n não encontra o arquivo PDF** | n8n enviou campo binário como `data` ou binário direto em vez de `file` | Tratamento flexível no FastAPI: aceitar `file`, `data`, `attachment` e raw stream |
+

@@ -132,14 +132,21 @@ Administração para limpeza total ou expurgo de registros com mais de 7 dias.
 
 ## 🐳 5. Execução com Docker & Easypanel
 
-### Executando com Docker Compose
+### Executando no Easypanel (Produção)
+O arquivo `docker-compose.yml` está 100% otimizado para o **Easypanel**:
+- Sem `container_name` fixo (permite deploy contínuo sem conflitos de recriação de contêiner).
+- Sem `ports` com bind direto no host (o Traefik do Easypanel gerencia o tráfego de domínio e SSL via `expose: 8000` na rede `easypanel`, eliminando avisos de conflito de portas).
+
+### Executando Localmente com Docker Compose
+Para expor a porta `8000` diretamente no `localhost` da sua máquina:
 ```bash
-# Crie a rede externa do Easypanel se for rodar na sua máquina local:
+# Crie a rede se não existir:
 docker network create easypanel
 
-# Inicialize o contêiner:
-docker compose up -d --build
+# Inicialize publicando na porta 8000 do localhost:
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ```
+
 
 ### Build e Execução Manual com Docker
 ```bash

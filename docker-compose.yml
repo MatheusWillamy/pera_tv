@@ -3,10 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: pera_tv_api
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     expose:
       - "8000"
     environment:
