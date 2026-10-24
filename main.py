@@ -144,4 +144,6 @@ async def purge_expired_cache():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    from config import PORT
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+

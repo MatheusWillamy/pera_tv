@@ -1,6 +1,7 @@
-# docker-compose.local.yml - Utilizado para rodar localmente com mapeamento de porta no host (localhost:8000)
+# docker-compose.local.yml - Utilizado para rodar localmente com mapeamento de porta no host (localhost:8001)
 # Uso: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 services:
   pera_tv_api:
     ports:
-      - "8000:8000"
+      - "8001:8001"
+

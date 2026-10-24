@@ -5,15 +5,16 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     expose:
-      - "8000"
+      - "8001"
     environment:
-      - PORT=8000
+      - PORT=8001
       - TMDB_API_KEY=${TMDB_API_KEY:-0be70a0df8da0d4df674178ecb774db1}
       - IPTV_URL=${IPTV_URL:-http://149.78.186.18}
       - IPTV_USERNAME=${IPTV_USERNAME:-57430164}
       - IPTV_PASSWORD=${IPTV_PASSWORD:-22727897}
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\" || exit 1"]
+
       interval: 30s
       timeout: 5s
       retries: 3

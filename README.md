@@ -119,14 +119,14 @@ Administração para limpeza total ou expurgo de registros com mais de 7 dias.
 3. Inicie o servidor:
    ```bash
    python server.py
-   # Ou via uvicorn direto:
-   uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+   # Ou via uvicorn direto na porta 8001:
+   uvicorn main:app --host 0.0.0.0 --port 8001 --reload
    ```
 
 4. Acesse:
-   - **Documentação Interativa (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
-   - **Healthcheck**: [http://localhost:8000/health](http://localhost:8000/health)
-   - **Sincronização de Catálogo**: [http://localhost:8000/api/v1/sync/catalog](http://localhost:8000/api/v1/sync/catalog)
+   - **Documentação Interativa (Swagger)**: [http://localhost:8001/docs](http://localhost:8001/docs)
+   - **Healthcheck**: [http://localhost:8001/health](http://localhost:8001/health)
+   - **Sincronização de Catálogo**: [http://localhost:8001/api/v1/sync/catalog](http://localhost:8001/api/v1/sync/catalog)
 
 ---
 
@@ -135,15 +135,15 @@ Administração para limpeza total ou expurgo de registros com mais de 7 dias.
 ### Executando no Easypanel (Produção)
 O arquivo `docker-compose.yml` está 100% otimizado para o **Easypanel**:
 - Sem `container_name` fixo (permite deploy contínuo sem conflitos de recriação de contêiner).
-- Sem `ports` com bind direto no host (o Traefik do Easypanel gerencia o tráfego de domínio e SSL via `expose: 8000` na rede `easypanel`, eliminando avisos de conflito de portas).
+- Sem `ports` com bind direto no host (o Traefik do Easypanel gerencia o tráfego de domínio e SSL via `expose: 8001` na rede `easypanel`, eliminando avisos de conflito de portas).
 
 ### Executando Localmente com Docker Compose
-Para expor a porta `8000` diretamente no `localhost` da sua máquina:
+Para expor a porta `8001` diretamente no `localhost` da sua máquina:
 ```bash
 # Crie a rede se não existir:
 docker network create easypanel
 
-# Inicialize publicando na porta 8000 do localhost:
+# Inicialize publicando na porta 8001 do localhost:
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ```
 
@@ -151,14 +151,15 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ### Build e Execução Manual com Docker
 ```bash
 docker build -t pera_tv_api .
-docker run -d -p 8000:8000 --name pera_tv_api pera_tv_api
+docker run -d -p 8001:8001 --name pera_tv_api pera_tv_api
 ```
 
 ### Deploy no Easypanel
 1. Crie um novo **App Service** no Easypanel apontando para o repositório GitHub `https://github.com/MatheusWillamy/pera_tv.git`.
 2. Selecione **Build Type**: `Dockerfile`.
-3. Defina a porta do contêiner como `8000`.
+3. Defina a porta do contêiner como `8001`.
 4. (Opcional) Configure as variáveis de ambiente:
+   - `PORT`: 8001
    - `TMDB_API_KEY`: sua chave de API v3 do TMDB
    - `IPTV_URL`: URL base do servidor IPTV
    - `IPTV_USERNAME`: Usuário
@@ -183,7 +184,7 @@ Exemplo de chamada em JavaScript para download instantâneo e persistência no I
 
 ```javascript
 async function syncFromPythonApi() {
-    const API_URL = "http://localhost:8000/api/v1/sync/catalog"; // ou URL da sua VPS
+    const API_URL = "http://localhost:8001/api/v1/sync/catalog"; // ou URL da sua VPS
     
     const response = await fetch(API_URL);
     const data = await response.json();

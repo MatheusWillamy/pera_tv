@@ -73,3 +73,7 @@ TMDB_CONCURRENCY_LIMIT = int(os.getenv("TMDB_CONCURRENCY_LIMIT", "15"))
 IPTV_REQUEST_TIMEOUT = float(os.getenv("IPTV_REQUEST_TIMEOUT", "45.0"))
 TMDB_REQUEST_TIMEOUT = float(os.getenv("TMDB_REQUEST_TIMEOUT", "6.0"))
 MAX_ITEMS_ENRICHMENT = int(os.getenv("MAX_ITEMS_ENRICHMENT", "800"))
+
+# Porta do Servidor (Padrão: 8001)
+PORT = int(os.getenv("PORT", "8001"))
+
