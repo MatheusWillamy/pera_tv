@@ -3,7 +3,10 @@ Pera TV - Backend de Ingestão e Normalização IPTV + TMDB (BFF).
 Implementação FastAPI com suporte a CORS, Docker, Easypanel, Hubs de Streaming
 com motor invertido TMDB Discover BR (JustWatch) e contratos IndexedDB.
 """
+from contextlib import asynccontextmanager
+import asyncio
 import logging
+import os
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,9 +19,12 @@ from catalog import (
     executar_match_streaming,
     obter_hub_provedor,
     obter_hubs_resumo,
+    obter_trending_match,
     salvar_match_manual,
     sincronizar_catalogo,
+    warmup_iptv_snapshot_background,
 )
+from config import ENABLE_STARTUP_WARMUP
 from iptv import IPTVAuthError, IPTVConnectionError
 from schemas import (
     HealthResponse,
@@ -36,10 +42,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pera_tv_api")
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    warmup_task = None
+    if ENABLE_STARTUP_WARMUP and not os.getenv("PYTEST_CURRENT_TEST"):
+        warmup_task = asyncio.create_task(warmup_iptv_snapshot_background())
+    try:
+        yield
+    finally:
+        if warmup_task and not warmup_task.done():
+            warmup_task.cancel()
+
+
 app = FastAPI(
     title="Pera TV - IPTV TMDB Enrichment BFF",
     description="Middleware de alto desempenho para enriquecimento e categorização de IPTV com TMDB",
-    version="2.2.0",
+    version="2.3.0",
+    lifespan=lifespan,
 )
 
 # ==============================================================================
@@ -80,7 +100,7 @@ async def iptv_connection_exception_handler(request: Request, exc: IPTVConnectio
 async def root():
     return {
         "service": "pera-tv-api",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "status": "online",
         "documentation": "/docs",
         "health": "/health",
@@ -91,6 +111,7 @@ async def root():
         "streaming_manual_match": "/api/v1/streaming/match/manual",
         "streaming_overrides": "/api/v1/streaming/overrides",
         "streaming_hubs_warm": "/api/v1/streaming/hubs/warm",
+        "streaming_trending": "/api/v1/streaming/trending",
     }
 
 
@@ -99,7 +120,7 @@ async def health():
     return {
         "status": "ok",
         "service": "pera-tv-api",
-        "version": "2.2.0",
+        "version": "2.3.0",
     }
 
 
@@ -223,8 +244,33 @@ async def delete_streaming_override(media_type: str, item_id: str):
     """Remove um match manual persistido e limpa cache dos hubs afetados."""
     removed = cache_module.cache_instance.delete_manual_match(media_type, item_id)
     if removed:
-        cache_module.cache_instance.delete_by_prefix("streaming_hub_v2:")
+        cache_module.cache_instance.delete_by_prefix("streaming_hub_v3:")
     return {"status": "success", "deleted": removed}
+
+
+@app.get("/api/v1/streaming/trending", tags=["Streaming Hubs"])
+async def get_streaming_trending(
+    force_refresh: bool = Query(False),
+    iptv_url: Optional[str] = Query(None),
+    username: Optional[str] = Query(None),
+    password: Optional[str] = Query(None),
+):
+    """Retorna filmes e séries em alta da semana no TMDB cruzados com o catálogo IPTV."""
+    try:
+        req_obj = (
+            SyncRequest(iptv_url=iptv_url, username=username, password=password, force_refresh=force_refresh)
+            if (iptv_url or username or password)
+            else None
+        )
+        return await obter_trending_match(req=req_obj, force_refresh=force_refresh)
+    except (IPTVAuthError, IPTVConnectionError):
+        raise
+    except Exception as exc:
+        logger.exception(f"Erro ao obter trending de streaming: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Falha ao obter trending de streaming: {str(exc)}",
+        )
 
 
 @app.post("/api/v1/streaming/hubs/warm", tags=["Streaming Hubs"])

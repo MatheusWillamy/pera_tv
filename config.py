@@ -36,10 +36,10 @@ TMDB_PROVIDER_IDS = {
     "netflix": [8, 1796],
     "hbo": [1899, 384, 1825],
     "disney": [337],
-    "prime": [119],
+    "prime": [119, 2100],
     "apple": [350],
-    "telecine": [227],
-    "paramount": [531, 582],
+    "telecine": [227, 2156],
+    "paramount": [531, 582, 2303],
     "mubi": [11],
 }
 
@@ -174,5 +174,6 @@ IPTV_REQUEST_TIMEOUT = float(os.getenv("IPTV_REQUEST_TIMEOUT", "45.0"))
 TMDB_REQUEST_TIMEOUT = float(os.getenv("TMDB_REQUEST_TIMEOUT", "6.0"))
 MAX_ITEMS_ENRICHMENT = int(os.getenv("MAX_ITEMS_ENRICHMENT", "800"))
 
-# Porta do Servidor (Padrão: 8001)
+# Porta do Servidor (Padrão: 8001) e warmup em background
 PORT = int(os.getenv("PORT", "8001"))
+ENABLE_STARTUP_WARMUP = os.getenv("ENABLE_STARTUP_WARMUP", "true").lower() in ("1", "true", "yes")

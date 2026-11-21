@@ -7,7 +7,7 @@ from typing import Dict, Optional, Set, Tuple
 from config import REGEX_CATEGORIA_FALLBACK, REGEX_CATEGORIA_REJEICAO, REGEX_RUIDOS
 
 _LEAD_LANG_TAG_RE = re.compile(
-    r"^\s*[\[(|]?\s*(BR|PT|PTBR|PT-BR|EN|ENG|ES|ESP|LAT|LEG|DUB|SUB)\s*(?:[\])|]\s*[-–|:]?|\s*[-–|:])\s*",
+    r"^\s*[\[(|]?\s*(BR|PT|PTBR|PT-BR|EN|ENG|ES|ESP|LAT|LEG|DUB|SUB|4K|UHD|FHD|HD)\s*(?:[\])|]\s*[-–|:]?|\s*[-–|:])\s*",
     re.IGNORECASE,
 )
 
@@ -24,7 +24,7 @@ def normalizar_titulo(raw_name: str) -> Tuple[str, Optional[int]]:
         return "", None
 
     texto = str(raw_name).strip()
-    for _ in range(2):
+    for _ in range(3):
         m = _LEAD_LANG_TAG_RE.match(texto)
         if not m:
             break
@@ -102,6 +102,26 @@ def chave_match_sem_artigo(texto: str) -> str:
         return ""
     stripped = _LEADING_ARTICLES_RE.sub("", base).strip()
     return stripped or base
+
+
+def chaves_match_alternativas(texto: str) -> list:
+    """
+    Gera variantes de chave normalizada inspiradas no MatchLogic (ex.: '&' como 'e' e 'and'),
+    para melhorar o match entre títulos localizados em PT-BR e originais em EN.
+    """
+    primary = chave_match(texto)
+    if not primary:
+        return []
+    out = [primary]
+    raw_str = str(texto or "")
+    if "&" in raw_str:
+        and_form = chave_match(raw_str.replace("&", " and "))
+        if and_form and and_form not in out:
+            out.append(and_form)
+    no_art = chave_match_sem_artigo(primary)
+    if no_art and no_art not in out:
+        out.append(no_art)
+    return out
 
 
 def similaridade_dice(a: str, b: str) -> float:

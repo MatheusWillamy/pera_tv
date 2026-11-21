@@ -213,7 +213,7 @@ async def buscar_discover_provedor(
     provider_param = "|".join(str(x) for x in ids)
     movie_pages = max(1, min(int(pages or DISCOVER_PAGES_PER_PROVIDER), 10))
     tv_pages = max(1, min(int(DISCOVER_TV_PAGES_PER_PROVIDER or 3), 5))
-    cache_key = f"tmdb_discover_br_v3:{provider_slug}:m{movie_pages}:t{tv_pages}"
+    cache_key = f"tmdb_discover_br_v4:{provider_slug}:m{movie_pages}:t{tv_pages}"
     if not force_refresh:
         cached = cache_module.cache_instance.get(cache_key, max_age_seconds=HUB_CACHE_TTL_SECONDS)
         if isinstance(cached, dict) and ("movie" in cached or "tv" in cached):
@@ -229,6 +229,7 @@ async def buscar_discover_provedor(
             "language": "pt-BR",
             "watch_region": "BR",
             "with_watch_providers": provider_param,
+            "with_watch_monetization_types": "flatrate",
             "sort_by": sort_by,
             "include_adult": "false",
             "page": str(page),
@@ -445,3 +446,80 @@ async def buscar_tmdb_por_id(
     except Exception as exc:
         logger.debug(f"Erro ao buscar TMDB por ID {mt}/{tmdb_id}: {exc}")
         return None
+
+
+async def buscar_trending_semana(
+    client: httpx.AsyncClient,
+    api_key: str,
+    pages: int = 2,
+    force_refresh: bool = False,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Consulta /trending/movie/week e /trending/tv/week no TMDB em PT-BR
+    (inspirado no IPVIO Trending.kt), com cache SQLite de 6 horas.
+    """
+    if not api_key:
+        return {"movie": [], "tv": []}
+
+    pages = max(1, min(int(pages or 2), 3))
+    cache_key = f"tmdb_trending_week_v1:p{pages}"
+    if not force_refresh:
+        cached = cache_module.cache_instance.get(cache_key, max_age_seconds=6 * 3600)
+        if isinstance(cached, dict) and ("movie" in cached or "tv" in cached):
+            return {"movie": cached.get("movie", []), "tv": cached.get("tv", [])}
+
+    async def fetch_trending_page(mt: str, page: int) -> List[Dict[str, Any]]:
+        url = f"{TMDB_BASE}/trending/{mt}/week"
+        params = {"api_key": api_key, "language": "pt-BR", "page": str(page)}
+        try:
+            r = await client.get(url, params=params, timeout=TMDB_REQUEST_TIMEOUT)
+            if r.status_code != 200:
+                return []
+            out = []
+            for item in r.json().get("results", []) or []:
+                tid = item.get("id")
+                if not tid:
+                    continue
+                poster_path = item.get("poster_path")
+                backdrop_path = item.get("backdrop_path")
+                date_str = str(item.get("release_date") or item.get("first_air_date") or "")
+                year = int(date_str[:4]) if len(date_str) >= 4 and date_str[:4].isdigit() else None
+                out.append(
+                    {
+                        "tmdb_id": tid,
+                        "media_type": mt,
+                        "title": item.get("title") or item.get("name") or "",
+                        "original_title": item.get("original_title") or item.get("original_name") or "",
+                        "overview": item.get("overview") or "",
+                        "poster": f"{TMDB_IMG_BASE}/w342{poster_path}" if poster_path else None,
+                        "backdrop": f"{TMDB_IMG_BASE}/w780{backdrop_path}" if backdrop_path else None,
+                        "vote_average": round(float(item.get("vote_average") or 0.0), 1),
+                        "vote_count": int(item.get("vote_count") or 0),
+                        "popularity": float(item.get("popularity") or 0.0),
+                        "year": year,
+                        "genre": formatar_generos(item.get("genre_ids", []) or []),
+                    }
+                )
+            return out
+        except Exception as exc:
+            logger.debug(f"Erro trending {mt} p{page}: {exc}")
+            return []
+
+    tasks = []
+    for mt in ("movie", "tv"):
+        for p in range(1, pages + 1):
+            tasks.append(fetch_trending_page(mt, p))
+
+    batches = await asyncio.gather(*tasks)
+    dedup: Dict[str, Dict[int, Dict[str, Any]]] = {"movie": {}, "tv": {}}
+    for batch in batches:
+        for entry in batch:
+            mt = entry["media_type"]
+            tid = entry["tmdb_id"]
+            if tid not in dedup[mt]:
+                dedup[mt][tid] = entry
+
+    result = {"movie": list(dedup["movie"].values()), "tv": list(dedup["tv"].values())}
+    if result["movie"] or result["tv"]:
+        cache_module.cache_instance.set(cache_key, result)
+    return result

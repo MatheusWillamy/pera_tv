@@ -5,6 +5,7 @@ from normalizer import (
     calcular_rating_5based,
     chave_match,
     chave_match_sem_artigo,
+    chaves_match_alternativas,
     detectar_provedores_heuristica,
     extrair_qualidade_audio,
     normalizar_titulo,
@@ -110,3 +111,12 @@ def test_extrair_qualidade_audio_legendado_e_dublado():
     assert dub["quality"] == "4K"
     assert dub["is_legendado"] is False
     assert dub["audio"] == "DUBLADO"
+
+
+def test_prefixos_regionais_e_variantes_e_comercial():
+    limpo, ano = normalizar_titulo("PT | [4K] BR - Interestelar (2014)")
+    assert limpo == "Interestelar"
+    assert ano == 2014
+    alts = chaves_match_alternativas("Velozes & Furiosos")
+    assert chave_match("Velozes e Furiosos") in alts
+    assert chave_match("Velozes and Furiosos") in alts

@@ -22,7 +22,7 @@ def test_health_endpoint(client):
     assert data == {
         "status": "ok",
         "service": "pera-tv-api",
-        "version": "2.2.0",
+        "version": "2.3.0",
     }
 
 
@@ -359,3 +359,62 @@ def test_warm_hubs_endpoint(client):
         assert data["status"] == "success"
         assert data["providers_warmed"] == 9
         assert "netflix" in data["stats"] and "prime" in data["stats"]
+
+
+def test_streaming_trending_endpoint(client):
+    from catalog import clear_memory_snapshot
+    clear_memory_snapshot()
+
+    vod_streams = [
+        {"stream_id": 701, "name": "Duna Parte Dois (2024) [4K]", "category_id": "1", "rating": "8.4"}
+    ]
+    ser_streams = [
+        {"series_id": 801, "name": "The Last of Us (2023)", "category_id": "2", "rating": "8.8"}
+    ]
+    mock_trending = {
+        "movie": [
+            {
+                "tmdb_id": 693134,
+                "media_type": "movie",
+                "title": "Duna: Parte Dois",
+                "original_title": "Dune: Part Two",
+                "overview": "Paul Atreides se une aos Fremen.",
+                "poster": "https://image.tmdb.org/t/p/w342/d2.jpg",
+                "backdrop": "https://image.tmdb.org/t/p/w780/d2_bg.jpg",
+                "vote_average": 8.3,
+                "vote_count": 5000,
+                "popularity": 210.0,
+                "year": 2024,
+                "genre": "Ficção científica",
+            }
+        ],
+        "tv": [
+            {
+                "tmdb_id": 100088,
+                "media_type": "series",
+                "title": "The Last of Us",
+                "original_title": "The Last of Us",
+                "overview": "Jornada pelos EUA.",
+                "poster": "https://image.tmdb.org/t/p/w342/tlou.jpg",
+                "backdrop": "https://image.tmdb.org/t/p/w780/tlou_bg.jpg",
+                "vote_average": 8.6,
+                "vote_count": 4000,
+                "popularity": 190.0,
+                "year": 2023,
+                "genre": "Drama",
+            }
+        ],
+    }
+
+    with (
+        patch("catalog.fetch_iptv_catalog", new=AsyncMock(return_value=(vod_streams, [], ser_streams, []))),
+        patch("catalog.buscar_trending_semana", new=AsyncMock(return_value=mock_trending)),
+    ):
+        res = client.get("/api/v1/streaming/trending")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "success"
+        assert data["counts"]["movies"] == 1
+        assert data["counts"]["series"] == 1
+        assert data["movies"][0]["id"] == "701"
+        assert data["series"][0]["id"] == "801"

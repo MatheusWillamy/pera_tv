@@ -25,13 +25,20 @@ from normalizer import (
     calcular_rating_5based,
     chave_match,
     chave_match_sem_artigo,
+    chaves_match_alternativas,
     detectar_provedores_heuristica,
     extrair_qualidade_audio,
     normalizar_titulo,
     titulos_equivalentes,
 )
 from schemas import ManualOverrideRequest, StreamingBatchMatchRequest, SyncRequest
-from tmdb import buscar_discover_provedor, buscar_tmdb, buscar_tmdb_por_id, buscar_trailer_youtube
+from tmdb import (
+    buscar_discover_provedor,
+    buscar_tmdb,
+    buscar_tmdb_por_id,
+    buscar_trailer_youtube,
+    buscar_trending_semana,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +181,9 @@ def _construir_indices_match(
         ak = chave_match_sem_artigo(mk)
         if ak:
             alt_index.setdefault(ak, []).append(entry)
+        for alt_k in chaves_match_alternativas(entry.get("title") or entry.get("raw_title") or ""):
+            if alt_k and alt_k != mk:
+                alt_index.setdefault(alt_k, []).append(entry)
 
         compact = mk.replace(" ", "")
         if len(compact) >= 3:
@@ -335,12 +345,14 @@ def _cruzar_discover_com_indice(
         for k in keys:
             candidates.extend(index_map.get(k, []))
 
-        # 2) Fallback: chave sem artigo inicial ("Os Vingadores" <-> "Vingadores")
+        # 2) Fallback: chave sem artigo inicial e variantes '&' <-> 'and'/'e'
         if not candidates and alt_index:
-            for k in keys:
-                ak = chave_match_sem_artigo(k)
-                if ak:
-                    candidates.extend(alt_index.get(ak, []))
+            seen_alt_keys = set()
+            for raw_alt in (tmdb_entry.get("title") or "", tmdb_entry.get("original_title") or ""):
+                for ak in chaves_match_alternativas(raw_alt):
+                    if ak and ak not in seen_alt_keys:
+                        seen_alt_keys.add(ak)
+                        candidates.extend(alt_index.get(ak, []))
 
         # 3) Fallback fuzzy: prefixo de 3 chars + Dice >= 0.85 com trava numérica
         if not candidates and prefix_index:
@@ -486,26 +498,28 @@ def _montar_prateleiras_hub(
             "top_rated": [],
         }
 
-    def hero_score(item: Dict[str, Any]) -> Tuple[int, float, float, int]:
+    def _platform_rank_key(item: Dict[str, Any]) -> Tuple[int, int, float, int]:
+        is_manual = 1 if item.get("source") == "manual_override" else 0
         has_backdrop = 1 if item.get("backdrop") and "image.tmdb.org" in item["backdrop"] else 0
-        from_tmdb = 1 if item.get("source") == "tmdb_discover+iptv" else 0
-        rating = float(item.get("rating") or 0.0)
+        native_bonus = 35.0 if item.get("_native_cat") else 0.0
         pop = float(item.get("_popularity") or 0.0)
+        rating = float(item.get("rating") or 0.0)
+        blended_score = round(pop + (rating * 5.0) + native_bonus, 2)
         year_val = int(item["year"]) if str(item.get("year") or "").isdigit() else 0
-        return (has_backdrop + from_tmdb, rating, pop, year_val)
+        return (is_manual, has_backdrop, blended_score, year_val)
 
-    ranked = sorted(all_items, key=hero_score, reverse=True)
+    ranked = sorted(all_items, key=_platform_rank_key, reverse=True)
     hero = ranked[0] if ranked else None
 
     featured = ranked[:18]
     series_list = sorted(
         [x for x in all_items if x["media_type"] == "series"],
-        key=lambda x: (1 if x.get("backdrop") else 0, float(x.get("rating") or 0.0), float(x.get("_popularity") or 0.0)),
+        key=_platform_rank_key,
         reverse=True,
     )[:24]
     movies_list = sorted(
         [x for x in all_items if x["media_type"] == "movie"],
-        key=lambda x: (1 if x.get("backdrop") else 0, float(x.get("rating") or 0.0), float(x.get("_popularity") or 0.0)),
+        key=_platform_rank_key,
         reverse=True,
     )[:24]
     recent = sorted(
@@ -558,7 +572,7 @@ async def obter_hub_provedor(
     password = req.password if req and req.password else DEFAULT_PASSWORD
     api_key = req.tmdb_api_key if req and req.tmdb_api_key else TMDB_API_KEY
 
-    hub_cache_key = f"streaming_hub_v2:{slug}:{iptv_url}:{username}"
+    hub_cache_key = f"streaming_hub_v3:{slug}:{iptv_url}:{username}"
     hub_data = None
     from_cache = False
 
@@ -612,13 +626,18 @@ async def obter_hub_provedor(
             # Camada 2: Categorias nativas do IPTV + regex sem falsos positivos
             cat_movies = _filtrar_categorias_iptv(snapshot["movies"], slug)
             cat_series = _filtrar_categorias_iptv(snapshot["series"], slug)
+            native_uids = {f"{x['media_type']}:{x['id']}" for x in cat_movies + cat_series}
 
             # Merge sem duplicar (prioriza manual_override -> TMDB Discover -> categorias IPTV)
             merged: Dict[str, Dict[str, Any]] = {}
             for item in manual_items + tmdb_movies + tmdb_series + cat_movies + cat_series:
                 uid = f"{item['media_type']}:{item['id']}"
+                if uid in native_uids:
+                    item["_native_cat"] = True
                 if uid not in merged:
                     merged[uid] = item
+                elif uid in native_uids:
+                    merged[uid]["_native_cat"] = True
 
             combined_items = list(merged.values())
             hero, shelves = _montar_prateleiras_hub(combined_items)
@@ -732,7 +751,7 @@ async def obter_hubs_resumo(
     username = req.username if req and req.username else DEFAULT_USERNAME
     providers_out = []
     for slug, meta in STREAMING_PROVIDERS_META.items():
-        hub_cache_key = f"streaming_hub_v2:{slug}:{iptv_url}:{username}"
+        hub_cache_key = f"streaming_hub_v3:{slug}:{iptv_url}:{username}"
         cached_hub = cache_module.cache_instance.get(hub_cache_key, max_age_seconds=HUB_CACHE_TTL_SECONDS)
         stats = cached_hub.get("stats") if isinstance(cached_hub, dict) else None
         providers_out.append(
@@ -1249,13 +1268,101 @@ async def salvar_match_manual(
 
     # Invalida apenas os hubs afetados (ou todos caso providers tenha mudado)
     for slug in STREAMING_PROVIDERS_META.keys():
-        cache_module.cache_instance.delete_by_prefix(f"streaming_hub_v2:{slug}:")
+        cache_module.cache_instance.delete_by_prefix(f"streaming_hub_v3:{slug}:")
 
     return {
         "status": "success",
         "override": saved,
         "tmdb_enriched": bool(tmdb_info),
     }
+
+
+async def warmup_iptv_snapshot_background() -> None:
+    """
+    Pré-carrega o catálogo bruto IPTV em memória ao subir o servidor,
+    eliminando a espera fria (~19s) na primeira abertura de streaming.
+    """
+    start_ts = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            fallback_ip = DEFAULT_IPTV_FALLBACK_IP.rstrip("/") if DEFAULT_IPTV_FALLBACK_IP else None
+            snap = await _obter_catalogo_iptv_cacheado(
+                http_client,
+                iptv_url=DEFAULT_IPTV_URL.rstrip("/"),
+                fallback_ip=fallback_ip,
+                username=DEFAULT_USERNAME,
+                password=DEFAULT_PASSWORD,
+                force_refresh=False,
+            )
+        logger.info(
+            f"[Warmup] Catálogo IPTV pronto em {time.time() - start_ts:.2f}s "
+            f"(filmes={len(snap.get('movies', []))}, séries={len(snap.get('series', []))})"
+        )
+    except Exception as exc:
+        logger.warning(f"[Warmup] Pré-aquecimento inicial ignorado sem afetar o boot: {exc}")
+
+
+async def obter_trending_match(
+    req: Optional[SyncRequest] = None,
+    force_refresh: bool = False,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Any]:
+    """
+    Cruza /trending/movie/week e /trending/tv/week do TMDB com 100% do catálogo IPTV,
+    entregando os lançamentos e populares em alta disponíveis no servidor.
+    """
+    start_time = time.time()
+    iptv_url = (req.iptv_url if req and req.iptv_url else DEFAULT_IPTV_URL).rstrip("/")
+    fallback_ip = (
+        (req.fallback_ip if req and req.fallback_ip else DEFAULT_IPTV_FALLBACK_IP).rstrip("/")
+        if (req and req.fallback_ip) or DEFAULT_IPTV_FALLBACK_IP
+        else None
+    )
+    username = req.username if req and req.username else DEFAULT_USERNAME
+    password = req.password if req and req.password else DEFAULT_PASSWORD
+    api_key = req.tmdb_api_key if req and req.tmdb_api_key else TMDB_API_KEY
+
+    async def _run(http_client: httpx.AsyncClient) -> Dict[str, Any]:
+        snap, trending = await asyncio.gather(
+            _obter_catalogo_iptv_cacheado(
+                http_client,
+                iptv_url=iptv_url,
+                fallback_ip=fallback_ip,
+                username=username,
+                password=password,
+                force_refresh=force_refresh,
+            ),
+            buscar_trending_semana(http_client, api_key=api_key, pages=2, force_refresh=force_refresh),
+        )
+        m_hits = _cruzar_discover_com_indice(
+            trending.get("movie", []),
+            snap["movies_index"],
+            alt_index=snap.get("movies_alt_index"),
+            prefix_index=snap.get("movies_prefix_index"),
+        )
+        s_hits = _cruzar_discover_com_indice(
+            trending.get("tv", []),
+            snap["series_index"],
+            alt_index=snap.get("series_alt_index"),
+            prefix_index=snap.get("series_prefix_index"),
+        )
+        return {
+            "status": "success",
+            "generated_at": int(time.time() * 1000),
+            "counts": {
+                "movies": len(m_hits),
+                "series": len(s_hits),
+                "total": len(m_hits) + len(s_hits),
+            },
+            "movies": [_clean_public_item(it) for it in m_hits[:40]],
+            "series": [_clean_public_item(it) for it in s_hits[:40]],
+            "elapsed_seconds": round(time.time() - start_time, 2),
+        }
+
+    if client is not None:
+        return await _run(client)
+    async with httpx.AsyncClient(timeout=60.0) as local_client:
+        return await _run(local_client)
 
 
 async def aquecer_todos_hubs(

@@ -96,11 +96,28 @@ Permite enviar credenciais customizadas se você desejar sincronizar outra conta
 - `GET /api/v1/streaming/overrides` e `DELETE /api/v1/streaming/overrides/{media_type}/{item_id}`: consulta e remoção de matches manuais salvos.
 - `POST /api/v1/streaming/hubs/warm`: aquece/reconstrói todos os 9 hubs compartilhando uma única leitura IPTV.
 
-### 3.5. `GET /api/v1/cache/stats`
+### 3.5. `GET /api/v1/streaming/trending` (Em Alta da Semana)
+Cruza os lançamentos e populares de `/trending/movie/week` e `/trending/tv/week` do TMDB (PT-BR, cache SQLite 6h) com 100% do catálogo IPTV, retornando até 40 filmes e 40 séries já deduplicados.
+
+### 3.6. `GET /api/v1/cache/stats`
 Exibe métricas do banco de cache local SQLite (registros totais, ativos e expirados).
 
-### 3.6. `POST /api/v1/cache/clear` e `POST /api/v1/cache/purge`
+### 3.7. `POST /api/v1/cache/clear` e `POST /api/v1/cache/purge`
 Administração para limpeza total ou expurgo de registros com mais de 7 dias.
+
+---
+
+## 🛠️ Gerenciador CLI/Menu (`iniciar_pera_tv.cmd`)
+Execute `iniciar_pera_tv.cmd` (duplo clique para menu interativo ou argumentos CLI):
+```cmd
+iniciar_pera_tv.cmd start     # Sobe Uvicorn (porta 8001) com warmup em background
+iniciar_pera_tv.cmd health    # Testa saúde local (:8001) e Easypanel
+iniciar_pera_tv.cmd match     # Verifica contagem real de filmes por plataforma
+iniciar_pera_tv.cmd warm      # Aquece os 9 hubs compartilhando 1 leitura IPTV
+iniciar_pera_tv.cmd trending  # Testa Trending da semana TMDB x IPTV
+iniciar_pera_tv.cmd parity    # Exibe tabela de paridade 1:1 com HTML offline
+iniciar_pera_tv.cmd test      # Executa pytest tests -v
+```
 
 ---
 
