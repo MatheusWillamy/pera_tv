@@ -9,7 +9,8 @@ services:
     environment:
       - PORT=8001
       - TMDB_API_KEY=${TMDB_API_KEY:-0be70a0df8da0d4df674178ecb774db1}
-      - IPTV_URL=${IPTV_URL:-http://149.78.186.18}
+      - IPTV_URL=${IPTV_URL:-http://dg25.me}
+      - IPTV_FALLBACK_IP=${IPTV_FALLBACK_IP:-http://50.7.178.191}
       - IPTV_USERNAME=${IPTV_USERNAME:-57430164}
       - IPTV_PASSWORD=${IPTV_PASSWORD:-22727897}
     healthcheck:

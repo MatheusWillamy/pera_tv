@@ -1,17 +1,24 @@
 """
 Pera TV - Backend de Ingestão e Normalização IPTV + TMDB (BFF).
-Implementação FastAPI com suporte a CORS, Docker, Easypanel e contratos IndexedDB.
+Implementação FastAPI com suporte a CORS, Docker, Easypanel, Hubs de Streaming
+com motor invertido TMDB Discover BR (JustWatch) e contratos IndexedDB.
 """
 import logging
-from typing import Any, Dict, Optional
-from fastapi import FastAPI, HTTPException, Request, status
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from cache import cache_instance
-from catalog import sincronizar_catalogo
+import cache as cache_module
+from catalog import clear_memory_snapshot, obter_hub_provedor, obter_hubs_resumo, sincronizar_catalogo
 from iptv import IPTVAuthError, IPTVConnectionError
-from schemas import HealthResponse, SyncCatalogResponse, SyncRequest
+from schemas import (
+    HealthResponse,
+    StreamingHubResponse,
+    StreamingHubsSummaryResponse,
+    SyncCatalogResponse,
+    SyncRequest,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,12 +33,12 @@ app = FastAPI(
 )
 
 # ==============================================================================
-# CORS COMPLETO ATIVADO
+# CORS COMPLETO ATIVADO (inclui origem file:/// -> Origin: null)
 # ==============================================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -68,6 +75,8 @@ async def root():
         "documentation": "/docs",
         "health": "/health",
         "sync_endpoint": "/api/v1/sync/catalog",
+        "streaming_hubs": "/api/v1/streaming/hubs",
+        "streaming_hub_detail": "/api/v1/streaming/hub/{provider}",
     }
 
 
@@ -80,13 +89,85 @@ async def health():
     }
 
 
+# ==============================================================================
+# HUBS DE STREAMING (PROCESSAMENTO 100% NO SERVIDOR - ZERO PESO NA TV BOX)
+# ==============================================================================
+@app.get("/api/v1/streaming/hubs", response_model=StreamingHubsSummaryResponse, tags=["Streaming Hubs"])
+async def list_streaming_hubs():
+    """Retorna metadados, logos oficiais TMDB e contadores em cache de todas as plataformas."""
+    return await obter_hubs_resumo(req=None)
+
+
+@app.get("/api/v1/streaming/hub/{provider}", response_model=StreamingHubResponse, tags=["Streaming Hubs"])
+async def get_streaming_hub(
+    provider: str,
+    media_type: str = Query("all", pattern="^(all|movie|series)$"),
+    q: Optional[str] = Query(None, description="Filtro de busca instantânea no provedor"),
+    force_refresh: bool = Query(False, description="Ignora cache SQLite 24h e reconstrói o hub"),
+    iptv_url: Optional[str] = Query(None),
+    username: Optional[str] = Query(None),
+    password: Optional[str] = Query(None),
+):
+    """
+    Entrega o Hub completo de um streaming (Netflix, HBO Max, Disney+, Prime Video, etc.)
+    já deduplicado, enriquecido com TMDB Discover BR (backdrop w780, poster w342, sinopse PT-BR,
+    nota real e trailer YouTube do Hero) e cacheado no SQLite por 24h.
+    """
+    try:
+        req_obj = (
+            SyncRequest(iptv_url=iptv_url, username=username, password=password, force_refresh=force_refresh)
+            if (iptv_url or username or password)
+            else None
+        )
+        return await obter_hub_provedor(
+            provider_slug=provider,
+            req=req_obj,
+            media_type=media_type,
+            query=q,
+            force_refresh=force_refresh,
+        )
+    except (IPTVAuthError, IPTVConnectionError):
+        raise
+    except Exception as exc:
+        logger.exception(f"Erro ao montar hub de streaming '{provider}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Falha interna ao montar hub de streaming: {str(exc)}",
+        )
+
+
+@app.post("/api/v1/streaming/hub/{provider}", response_model=StreamingHubResponse, tags=["Streaming Hubs"])
+async def post_streaming_hub(
+    provider: str,
+    req: Optional[SyncRequest] = None,
+    media_type: str = Query("all", pattern="^(all|movie|series)$"),
+    q: Optional[str] = Query(None),
+):
+    """Versão POST do Hub de Streaming aceitando credenciais IPTV/TMDB no corpo JSON."""
+    try:
+        req_obj = req or SyncRequest()
+        return await obter_hub_provedor(
+            provider_slug=provider,
+            req=req_obj,
+            media_type=media_type,
+            query=q,
+            force_refresh=bool(req_obj.force_refresh),
+        )
+    except (IPTVAuthError, IPTVConnectionError):
+        raise
+    except Exception as exc:
+        logger.exception(f"Erro no POST hub de streaming '{provider}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Falha interna ao montar hub de streaming: {str(exc)}",
+        )
+
+
+# ==============================================================================
+# SINCRONIZAÇÃO COMPLETA DE CATÁLOGO (CONTRATO INDEXEDDB)
+# ==============================================================================
 @app.get("/api/v1/sync/catalog", response_model=SyncCatalogResponse, tags=["Catalog"])
 async def sync_catalog_get():
-    """
-    Sincronização com Zero Configuração:
-    Utiliza automaticamente as chaves e credenciais embutidas no código.
-    Pode ser acessado diretamente no navegador ou via GET simples no frontend.
-    """
     try:
         return await sincronizar_catalogo(req=None)
     except (IPTVAuthError, IPTVConnectionError):
@@ -101,11 +182,6 @@ async def sync_catalog_get():
 
 @app.post("/api/v1/sync/catalog", response_model=SyncCatalogResponse, tags=["Catalog"])
 async def sync_catalog_post(req: Optional[SyncRequest] = None):
-    """
-    Sincronização com Sobrescrita Dinâmica Opcional:
-    Permite enviar credenciais customizadas de IPTV ou chave TMDB no JSON Body.
-    Qualquer campo omitido utiliza o valor padrão embutido.
-    """
     try:
         req_obj = req or SyncRequest()
         return await sincronizar_catalogo(req=req_obj)
@@ -125,20 +201,21 @@ async def sync_catalog_post(req: Optional[SyncRequest] = None):
 @app.get("/api/v1/cache/stats", tags=["Cache"])
 async def get_cache_stats():
     """Retorna métricas do banco de cache local SQLite (TTL de 7 dias)."""
-    return cache_instance.stats()
+    return cache_module.cache_instance.stats()
 
 
 @app.post("/api/v1/cache/clear", tags=["Cache"])
 async def clear_cache():
-    """Limpa todos os dados armazenados no cache SQLite."""
-    deleted = cache_instance.clear()
+    """Limpa todos os dados armazenados no cache SQLite e snapshot em memória."""
+    deleted = cache_module.cache_instance.clear()
+    clear_memory_snapshot()
     return {"status": "success", "deleted_records": deleted}
 
 
 @app.post("/api/v1/cache/purge", tags=["Cache"])
 async def purge_expired_cache():
     """Remove registros antigos que ultrapassaram o TTL de 7 dias."""
-    purged = cache_instance.purge_expired()
+    purged = cache_module.cache_instance.purge_expired()
     return {"status": "success", "purged_records": purged}
 
 
@@ -146,4 +223,3 @@ if __name__ == "__main__":
     import uvicorn
     from config import PORT
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
-

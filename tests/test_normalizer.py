@@ -69,3 +69,16 @@ def test_calcular_rating_5based():
     assert calcular_rating_5based("7.5") == 3.8
     assert calcular_rating_5based(None) == 0.0
     assert calcular_rating_5based("invalido") == 0.0
+
+
+def test_anti_falso_positivo_hbo_kurt_warner():
+    providers = detectar_provedores_heuristica(
+        "American Underdog: A História de Kurt Warner (2021) [FHD]",
+        "FILMES | DRAMA",
+    )
+    assert "hbo" not in providers
+
+
+def test_anti_falso_positivo_mad_max_e_optimus_prime():
+    assert "hbo" not in detectar_provedores_heuristica("Mad Max: Estrada da Fúria (2015)", "FILMES | AÇÃO")
+    assert "prime" not in detectar_provedores_heuristica("Optimus Prime: A Origem", "FILMES | AÇÃO")

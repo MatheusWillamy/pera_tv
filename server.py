@@ -3,16 +3,23 @@ Script de Inicialização Direta do Servidor Pera TV BFF.
 Permite executar via `python server.py`.
 """
 import uvicorn
-from config import DEFAULT_IPTV_URL, DEFAULT_USERNAME, PORT, TMDB_API_KEY
+from config import (
+    DEFAULT_IPTV_FALLBACK_IP,
+    DEFAULT_IPTV_URL,
+    DEFAULT_USERNAME,
+    PORT,
+    TMDB_API_KEY,
+)
 from main import app
 
 if __name__ == "__main__":
     print("\n" + "=" * 65)
     print(" 🚀 PERA TV - SERVIDOR BFF INICIADO COM SUCESSO!")
     print("=" * 65)
-    print(f" • PORTA ATIVA: {PORT}")
-    print(f" • IPTV URL:    {DEFAULT_IPTV_URL}")
-    print(f" • USUÁRIO:     {DEFAULT_USERNAME}")
+    print(f" • PORTA ATIVA:         {PORT}")
+    print(f" • IPTV LINK (OFICIAL): {DEFAULT_IPTV_URL}")
+    print(f" • IPTV IP (FALLBACK):  {DEFAULT_IPTV_FALLBACK_IP} (Uso direto / contingência)")
+    print(f" • USUÁRIO:             {DEFAULT_USERNAME}")
     print(f" • TMDB KEY:    {TMDB_API_KEY[:8]}... (Configurada)")
     print(f" • SWAGGER DOC: http://localhost:{PORT}/docs")
     print(f" • HEALTHCHECK: http://localhost:{PORT}/health")

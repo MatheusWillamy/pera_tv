@@ -171,3 +171,96 @@ def test_sync_catalog_connection_failure(client):
         data = response.json()
         assert data["error_code"] == "IPTV_CONNECTION_FAILED"
         assert "Tempo esgotado" in data["detail"]
+
+
+def test_sync_catalog_fallback_to_contingency_ip(client, mock_iptv_dataset):
+    """
+    Testa se o sistema aciona com sucesso o IP de contingência quando
+    o link oficial sofre falha de conexão (DNS/Timeout).
+    """
+    with patch(
+        "catalog.fetch_iptv_catalog",
+        side_effect=[
+            IPTVConnectionError("Falha de DNS ao resolver link principal"),
+            mock_iptv_dataset,
+        ],
+    ):
+        response = client.get("/api/v1/sync/catalog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert len(data["vod_streams"]) == 2
+
+
+def test_streaming_hubs_summary_endpoint(client):
+    res = client.get("/api/v1/streaming/hubs")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    ids = [p["id"] for p in data["providers"]]
+    assert "netflix" in ids and "hbo" in ids and "disney" in ids and "mubi" in ids
+
+
+def test_streaming_hub_hbo_dedup_and_discover_match(client):
+    from catalog import clear_memory_snapshot
+    clear_memory_snapshot()
+
+    vod_cats = [
+        {"category_id": "1", "category_name": "FILMES | DRAMA"},
+        {"category_id": "2", "category_name": "FILMES | FICCAO"},
+    ]
+    vod_streams = [
+        # 4 copias de Kurt Warner (nao devem entrar na HBO Max!)
+        {"stream_id": 101, "name": "American Underdog: A Historia de Kurt Warner (2021) [FHD]", "category_id": "1", "rating": "7.1"},
+        {"stream_id": 102, "name": "American Underdog: A Historia de Kurt Warner (2021) [4K]", "category_id": "1", "rating": "7.1"},
+        # 2 copias de Interestelar (devem deduplicar em 1 so e casar via TMDB Discover BR!)
+        {"stream_id": 201, "name": "Interestelar (2014) [FHD]", "category_id": "2", "rating": "8.6"},
+        {"stream_id": 202, "name": "Interestelar (2014) [4K DUBLADO]", "category_id": "2", "rating": "8.6"},
+    ]
+    ser_cats = [{"category_id": "10", "category_name": "SERIES | HBO MAX"}]
+    ser_streams = [
+        {"series_id": 301, "name": "The Last of Us (2023)", "category_id": "10", "cover": "http://img/tlou.jpg", "rating": "8.8"},
+    ]
+    mock_discover = {
+        "movie": [
+            {
+                "tmdb_id": 157336,
+                "media_type": "movie",
+                "title": "Interestelar",
+                "original_title": "Interstellar",
+                "overview": "Uma equipe de exploradores viaja atraves de um buraco de minhoca.",
+                "poster": "https://image.tmdb.org/t/p/w342/inter.jpg",
+                "backdrop": "https://image.tmdb.org/t/p/w780/inter_bg.jpg",
+                "vote_average": 8.4,
+                "vote_count": 34000,
+                "popularity": 180.0,
+                "year": 2014,
+                "genre": "Aventura, Drama, Ficção científica",
+            }
+        ],
+        "tv": [],
+    }
+
+    with (
+        patch("catalog.fetch_iptv_catalog", new=AsyncMock(return_value=(vod_streams, vod_cats, ser_streams, ser_cats))),
+        patch("catalog.buscar_discover_provedor", new=AsyncMock(return_value=mock_discover)),
+        patch("catalog.buscar_trailer_youtube", new=AsyncMock(return_value="zSWdZVtXT7E")),
+    ):
+        res = client.get("/api/v1/streaming/hub/hbo")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["provider"]["id"] == "hbo"
+        assert data["stats"]["movies"] == 1  # Interestelar deduplicado (sem Kurt Warner!)
+        assert data["stats"]["series"] == 1  # The Last of Us da categoria SERIES | HBO MAX
+        assert data["hero"]["id"] == "202"   # Preferiu versao 4K DUBLADO!
+        assert data["hero"]["versions_count"] == 2
+        assert data["hero"]["trailer_key"] == "zSWdZVtXT7E"
+        assert data["hero"]["backdrop"] == "https://image.tmdb.org/t/p/w780/inter_bg.jpg"
+
+        # Segunda chamada deve vir do cache SQLite
+        res2 = client.get("/api/v1/streaming/hub/hbo?media_type=series")
+        assert res2.status_code == 200
+        d2 = res2.json()
+        assert d2["cached"] is True
+        assert len(d2["shelves"]["movies"]) == 0
+        assert len(d2["shelves"]["series"]) == 1

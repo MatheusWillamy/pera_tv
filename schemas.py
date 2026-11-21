@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 
 
 class SyncRequest(BaseModel):
-    iptv_url: Optional[str] = Field(None, description="URL base ou IP do servidor IPTV Xtream Codes")
+    iptv_url: Optional[str] = Field(None, description="URL oficial ou Link (domínio) do servidor IPTV Xtream Codes")
+    fallback_ip: Optional[str] = Field(None, description="IP direto de contingência para fallback em caso de falha de conexão com a URL principal")
     username: Optional[str] = Field(None, description="Usuário IPTV")
     password: Optional[str] = Field(None, description="Senha IPTV")
     tmdb_api_key: Optional[str] = Field(None, description="Chave de API v3 do The Movie Database (TMDB)")
@@ -43,3 +44,43 @@ class SyncCatalogResponse(BaseModel):
     vod_streams: List[Dict[str, Any]]
     series_categories: List[Dict[str, Any]]
     series_streams: List[Dict[str, Any]]
+
+
+class StreamingHubItem(BaseModel):
+    id: str
+    media_type: str  # "movie" | "series"
+    title: str
+    raw_title: str
+    year: str = ""
+    rating: float = 0.0
+    quality: str = "HD"
+    audio: str = ""
+    poster: str = ""
+    backdrop: str = ""
+    overview: str = ""
+    genre: str = ""
+    duration_secs: int = 0
+    container_extension: str = "mp4"
+    category_id: str = "0"
+    category_name: str = ""
+    tmdb_id: Optional[int] = None
+    trailer_key: Optional[str] = None
+    source: str = "iptv"  # "tmdb_discover+iptv" | "iptv_category"
+    versions_count: int = 1
+
+
+class StreamingHubResponse(BaseModel):
+    status: str = "success"
+    provider: Dict[str, Any]
+    cached: bool = False
+    generated_at: int
+    stats: Dict[str, int]
+    hero: Optional[StreamingHubItem] = None
+    shelves: Dict[str, List[StreamingHubItem]]
+    search_results: Optional[List[StreamingHubItem]] = None
+
+
+class StreamingHubsSummaryResponse(BaseModel):
+    status: str = "success"
+    generated_at: int
+    providers: List[Dict[str, Any]]
