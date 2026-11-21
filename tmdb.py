@@ -13,6 +13,7 @@ import httpx
 import cache as cache_module
 from config import (
     DISCOVER_PAGES_PER_PROVIDER,
+    DISCOVER_TV_PAGES_PER_PROVIDER,
     HUB_CACHE_TTL_SECONDS,
     TMDB_BASE,
     TMDB_IMG_BASE,
@@ -209,7 +210,10 @@ async def buscar_discover_provedor(
     if not ids or not api_key:
         return {"movie": [], "tv": []}
 
-    cache_key = f"tmdb_discover_br_v2:{provider_slug}:{pages}"
+    provider_param = "|".join(str(x) for x in ids)
+    movie_pages = max(1, min(int(pages or DISCOVER_PAGES_PER_PROVIDER), 10))
+    tv_pages = max(1, min(int(DISCOVER_TV_PAGES_PER_PROVIDER or 3), 5))
+    cache_key = f"tmdb_discover_br_v3:{provider_slug}:m{movie_pages}:t{tv_pages}"
     if not force_refresh:
         cached = cache_module.cache_instance.get(cache_key, max_age_seconds=HUB_CACHE_TTL_SECONDS)
         if isinstance(cached, dict) and ("movie" in cached or "tv" in cached):
@@ -217,9 +221,6 @@ async def buscar_discover_provedor(
                 "movie": cached.get("movie", []),
                 "tv": cached.get("tv", []),
             }
-
-    provider_param = "|".join(str(x) for x in ids)
-    safe_pages = max(1, min(int(pages or 2), 5))
 
     async def fetch_page(media_type: str, page: int, sort_by: str) -> List[Dict[str, Any]]:
         url = f"{TMDB_BASE}/discover/{media_type}"
@@ -269,10 +270,13 @@ async def buscar_discover_provedor(
             return []
 
     tasks = []
-    for media_type in ("movie", "tv"):
-        for p in range(1, safe_pages + 1):
-            tasks.append(fetch_page(media_type, p, "popularity.desc"))
-        tasks.append(fetch_page(media_type, 1, "vote_average.desc"))
+    for p in range(1, movie_pages + 1):
+        tasks.append(fetch_page("movie", p, "popularity.desc"))
+    tasks.append(fetch_page("movie", 1, "vote_average.desc"))
+    tasks.append(fetch_page("movie", 2, "vote_average.desc"))
+    for p in range(1, tv_pages + 1):
+        tasks.append(fetch_page("tv", p, "popularity.desc"))
+    tasks.append(fetch_page("tv", 1, "vote_average.desc"))
 
     batches = await asyncio.gather(*tasks)
     dedup: Dict[str, Dict[int, Dict[str, Any]]] = {"movie": {}, "tv": {}}
