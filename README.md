@@ -90,10 +90,16 @@ Permite enviar credenciais customizadas se você desejar sincronizar outra conta
 }
 ```
 
-### 3.4. `GET /api/v1/cache/stats`
+### 3.4. `POST /api/v1/streaming/match` & `POST /api/v1/streaming/match/manual` (Match Manual & em Lote)
+- `POST /api/v1/streaming/match`: recebe uma lista manual de `items` enviados pelo cliente (ou usa o catálogo do servidor IPTV) e executa o motor de cruzamento completo com **TMDB Discover BR** (incluindo conversão de algarismos romanos, remoção de artigos e comparação fuzzy com trava numérica), retornando `streaming_providers`, `matched_items` e flag `is_legendado`.
+- `POST /api/v1/streaming/match/manual`: grava um **override manual permanente** no SQLite (tabela `manual_matches`, sem expiração TTL), podendo enriquecer automaticamente via `tmdb_id` ou `title + year`, refletindo imediatamente em `GET /api/v1/streaming/hub/{provider}`.
+- `GET /api/v1/streaming/overrides` e `DELETE /api/v1/streaming/overrides/{media_type}/{item_id}`: consulta e remoção de matches manuais salvos.
+- `POST /api/v1/streaming/hubs/warm`: aquece/reconstrói todos os 9 hubs compartilhando uma única leitura IPTV.
+
+### 3.5. `GET /api/v1/cache/stats`
 Exibe métricas do banco de cache local SQLite (registros totais, ativos e expirados).
 
-### 3.5. `POST /api/v1/cache/clear` e `POST /api/v1/cache/purge`
+### 3.6. `POST /api/v1/cache/clear` e `POST /api/v1/cache/purge`
 Administração para limpeza total ou expurgo de registros com mais de 7 dias.
 
 ---

@@ -24,12 +24,14 @@ from iptv import IPTVConnectionError, fetch_iptv_catalog
 from normalizer import (
     calcular_rating_5based,
     chave_match,
+    chave_match_sem_artigo,
     detectar_provedores_heuristica,
     extrair_qualidade_audio,
     normalizar_titulo,
+    titulos_equivalentes,
 )
-from schemas import SyncRequest
-from tmdb import buscar_discover_provedor, buscar_tmdb, buscar_trailer_youtube
+from schemas import ManualOverrideRequest, StreamingBatchMatchRequest, SyncRequest
+from tmdb import buscar_discover_provedor, buscar_tmdb, buscar_tmdb_por_id, buscar_trailer_youtube
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +151,73 @@ def _deduplicar_itens(
     return items_list, match_index
 
 
+def _construir_indices_match(
+    items_list: List[Dict[str, Any]],
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+    """
+    Constrói 3 índices O(1) para cruzamento IPTV <-> TMDB:
+    1. match_index (chave normalizada com algarismos romanos convertidos)
+    2. alt_index (chave sem artigo inicial: O, A, Os, As, The...)
+    3. prefix_index (prefixo compacto de 3 chars para fallback fuzzy com bigramas Dice)
+    """
+    match_index: Dict[str, List[Dict[str, Any]]] = {}
+    alt_index: Dict[str, List[Dict[str, Any]]] = {}
+    prefix_index: Dict[str, List[Dict[str, Any]]] = {}
+
+    for entry in items_list:
+        mk = entry.get("match_key") or chave_match(entry.get("title") or entry.get("raw_title") or "")
+        if not mk:
+            continue
+        entry["match_key"] = mk
+        match_index.setdefault(mk, []).append(entry)
+
+        ak = chave_match_sem_artigo(mk)
+        if ak:
+            alt_index.setdefault(ak, []).append(entry)
+
+        compact = mk.replace(" ", "")
+        if len(compact) >= 3:
+            prefix_index.setdefault(compact[:3], []).append(entry)
+
+    return match_index, alt_index, prefix_index
+
+
+def _normalizar_itens_cliente(
+    client_items: List[Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Converte itens enviados manualmente pelo cliente (POST /api/v1/streaming/match)
+    no mesmo formato padronizado usado pelo pipeline interno de deduplicação.
+    """
+    raw_movies: List[Dict[str, Any]] = []
+    raw_series: List[Dict[str, Any]] = []
+
+    for it in client_items:
+        obj = it.model_dump() if hasattr(it, "model_dump") else dict(it)
+        mt = "series" if str(obj.get("media_type", "")).lower() in ("series", "tv") else "movie"
+        base = {
+            "id": str(obj.get("id") or ""),
+            "name": str(obj.get("name") or ""),
+            "category_name": str(obj.get("category_name") or ""),
+            "category_id": "0",
+            "year": obj.get("year") or "",
+            "rating": obj.get("rating"),
+            "container_extension": obj.get("container_extension") or "mp4",
+        }
+        if mt == "series":
+            base["series_id"] = base["id"]
+            base["cover"] = str(obj.get("poster") or "")
+            raw_series.append(base)
+        else:
+            base["stream_id"] = base["id"]
+            base["stream_icon"] = str(obj.get("poster") or "")
+            raw_movies.append(base)
+
+    movies_dedup, _ = _deduplicar_itens(raw_movies, {}, "movie")
+    series_dedup, _ = _deduplicar_itens(raw_series, {}, "series")
+    return movies_dedup, series_dedup
+
+
 async def _obter_catalogo_iptv_cacheado(
     http_client: httpx.AsyncClient,
     iptv_url: str,
@@ -158,7 +227,7 @@ async def _obter_catalogo_iptv_cacheado(
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
     """
-    Baixa e indexa (com deduplicação e índice O(1)) todo o catálogo IPTV uma vez,
+    Baixa e indexa (com deduplicação e índices O(1)/fuzzy) todo o catálogo IPTV uma vez,
     mantendo em memória por 20 minutos para que trocas entre Netflix/HBO/Disney sejam instantâneas.
     """
     snap_key = f"{iptv_url}|{username}"
@@ -194,8 +263,10 @@ async def _obter_catalogo_iptv_cacheado(
     vod_cat_map = {str(c.get("category_id")): str(c.get("category_name", "")) for c in vod_categories}
     series_cat_map = {str(c.get("category_id")): str(c.get("category_name", "")) for c in series_categories}
 
-    movies_dedup, movies_index = _deduplicar_itens(vod_streams, vod_cat_map, "movie")
-    series_dedup, series_index = _deduplicar_itens(series_streams, series_cat_map, "series")
+    movies_dedup, _ = _deduplicar_itens(vod_streams, vod_cat_map, "movie")
+    series_dedup, _ = _deduplicar_itens(series_streams, series_cat_map, "series")
+    movies_index, movies_alt_index, movies_prefix_index = _construir_indices_match(movies_dedup)
+    series_index, series_alt_index, series_prefix_index = _construir_indices_match(series_dedup)
 
     snapshot = {
         "ts": now,
@@ -203,8 +274,14 @@ async def _obter_catalogo_iptv_cacheado(
         "series_raw_count": len(series_streams),
         "movies": movies_dedup,
         "movies_index": movies_index,
+        "movies_alt_index": movies_alt_index,
+        "movies_prefix_index": movies_prefix_index,
+        "movies_by_id": {m["id"]: m for m in movies_dedup},
         "series": series_dedup,
         "series_index": series_index,
+        "series_alt_index": series_alt_index,
+        "series_prefix_index": series_prefix_index,
+        "series_by_id": {s["id"]: s for s in series_dedup},
     }
     _iptv_mem_snapshot[snap_key] = snapshot
     return snapshot
@@ -220,6 +297,7 @@ def _clean_public_item(entry: Dict[str, Any]) -> Dict[str, Any]:
         "rating": round(float(entry.get("rating") or 0.0), 1),
         "quality": entry.get("quality") or "HD",
         "audio": entry.get("audio") or "",
+        "is_legendado": bool(entry.get("is_legendado", False)),
         "poster": entry.get("poster") or "",
         "backdrop": entry.get("backdrop") or "",
         "overview": entry.get("overview") or "",
@@ -238,6 +316,8 @@ def _clean_public_item(entry: Dict[str, Any]) -> Dict[str, Any]:
 def _cruzar_discover_com_indice(
     discover_list: List[Dict[str, Any]],
     index_map: Dict[str, List[Dict[str, Any]]],
+    alt_index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    prefix_index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     matched_items: List[Dict[str, Any]] = []
     seen_ids = set()
@@ -254,6 +334,28 @@ def _cruzar_discover_com_indice(
         candidates: List[Dict[str, Any]] = []
         for k in keys:
             candidates.extend(index_map.get(k, []))
+
+        # 2) Fallback: chave sem artigo inicial ("Os Vingadores" <-> "Vingadores")
+        if not candidates and alt_index:
+            for k in keys:
+                ak = chave_match_sem_artigo(k)
+                if ak:
+                    candidates.extend(alt_index.get(ak, []))
+
+        # 3) Fallback fuzzy: prefixo de 3 chars + Dice >= 0.85 com trava numérica
+        if not candidates and prefix_index:
+            seen_cand_ids = set()
+            for k in keys:
+                compact = k.replace(" ", "")
+                if len(compact) < 3:
+                    continue
+                for cand in prefix_index.get(compact[:3], []):
+                    cid = f"{cand['media_type']}:{cand['id']}"
+                    if cid in seen_cand_ids:
+                        continue
+                    seen_cand_ids.add(cid)
+                    if titulos_equivalentes(cand.get("match_key") or "", k):
+                        candidates.append(cand)
 
         if not candidates:
             continue
@@ -277,9 +379,7 @@ def _cruzar_discover_com_indice(
         enriched["source"] = "tmdb_discover+iptv"
         if tmdb_entry.get("backdrop"):
             enriched["backdrop"] = tmdb_entry["backdrop"]
-        if tmdb_entry.get("poster") and not enriched.get("poster"):
-            enriched["poster"] = tmdb_entry["poster"]
-        elif tmdb_entry.get("poster"):
+        if tmdb_entry.get("poster"):
             # Prefere pôster HD oficial TMDB (w342) que sempre carrega sem quebrar
             enriched["poster"] = tmdb_entry["poster"]
         if tmdb_entry.get("overview"):
@@ -294,6 +394,62 @@ def _cruzar_discover_com_indice(
         matched_items.append(enriched)
 
     return matched_items
+
+
+def _resolver_overrides_para_provedor(
+    provider_slug: str,
+    movies_by_id: Dict[str, Dict[str, Any]],
+    series_by_id: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    overrides = cache_module.cache_instance.list_manual_matches(provider=provider_slug)
+    out: List[Dict[str, Any]] = []
+    for ov in overrides:
+        mt = "series" if ov.get("media_type") == "series" else "movie"
+        iid = str(ov.get("item_id") or "")
+        if not iid:
+            continue
+        base_map = series_by_id if mt == "series" else movies_by_id
+        local_entry = base_map.get(iid)
+        merged = dict(local_entry) if local_entry else {
+            "id": iid,
+            "media_type": mt,
+            "title": ov.get("title") or "Título",
+            "raw_title": ov.get("raw_title") or ov.get("title") or "Título",
+            "year": str(ov.get("year") or ""),
+            "rating": float(ov.get("rating") or 0.0),
+            "quality": "HD",
+            "audio": "",
+            "is_legendado": False,
+            "poster": "",
+            "backdrop": "",
+            "overview": "",
+            "genre": "",
+            "duration_secs": 0,
+            "container_extension": "mp4",
+            "category_id": "0",
+            "category_name": "Manual Match",
+            "versions_count": 1,
+        }
+        if ov.get("tmdb_id"):
+            merged["tmdb_id"] = ov["tmdb_id"]
+        if ov.get("poster"):
+            merged["poster"] = ov["poster"]
+        if ov.get("backdrop"):
+            merged["backdrop"] = ov["backdrop"]
+        if ov.get("overview"):
+            merged["overview"] = ov["overview"]
+        if ov.get("genre"):
+            merged["genre"] = ov["genre"]
+        if ov.get("rating"):
+            merged["rating"] = float(ov["rating"])
+        if ov.get("trailer_key"):
+            merged["trailer_key"] = ov["trailer_key"]
+        if ov.get("year") and not merged.get("year"):
+            merged["year"] = str(ov["year"])
+        merged["source"] = "manual_override"
+        merged["_popularity"] = 999.0
+        out.append(merged)
+    return out
 
 
 def _filtrar_categorias_iptv(
@@ -432,17 +588,34 @@ async def obter_hub_provedor(
                 ),
             )
 
-            # Camada 1: Cruzamento TMDB Discover BR (JustWatch) × 100% do catálogo local (O(1))
-            tmdb_movies = _cruzar_discover_com_indice(discover_data.get("movie", []), snapshot["movies_index"])
-            tmdb_series = _cruzar_discover_com_indice(discover_data.get("tv", []), snapshot["series_index"])
+            # Camada 0: Overrides manuais persistidos no SQLite (prioridade máxima)
+            manual_items = _resolver_overrides_para_provedor(
+                slug,
+                snapshot.get("movies_by_id", {}),
+                snapshot.get("series_by_id", {}),
+            )
+
+            # Camada 1: Cruzamento TMDB Discover BR (JustWatch) × 100% do catálogo local (O(1) + Fuzzy)
+            tmdb_movies = _cruzar_discover_com_indice(
+                discover_data.get("movie", []),
+                snapshot["movies_index"],
+                alt_index=snapshot.get("movies_alt_index"),
+                prefix_index=snapshot.get("movies_prefix_index"),
+            )
+            tmdb_series = _cruzar_discover_com_indice(
+                discover_data.get("tv", []),
+                snapshot["series_index"],
+                alt_index=snapshot.get("series_alt_index"),
+                prefix_index=snapshot.get("series_prefix_index"),
+            )
 
             # Camada 2: Categorias nativas do IPTV + regex sem falsos positivos
             cat_movies = _filtrar_categorias_iptv(snapshot["movies"], slug)
             cat_series = _filtrar_categorias_iptv(snapshot["series"], slug)
 
-            # Merge sem duplicar (prioriza versão enriquecida com TMDB Discover)
+            # Merge sem duplicar (prioriza manual_override -> TMDB Discover -> categorias IPTV)
             merged: Dict[str, Dict[str, Any]] = {}
-            for item in tmdb_movies + tmdb_series + cat_movies + cat_series:
+            for item in manual_items + tmdb_movies + tmdb_series + cat_movies + cat_series:
                 uid = f"{item['media_type']}:{item['id']}"
                 if uid not in merged:
                     merged[uid] = item
@@ -484,7 +657,7 @@ async def obter_hub_provedor(
 
             total_movies = sum(1 for x in combined_items if x["media_type"] == "movie")
             total_series = sum(1 for x in combined_items if x["media_type"] == "series")
-            tmdb_enriched = sum(1 for x in combined_items if x.get("source") == "tmdb_discover+iptv")
+            tmdb_enriched = sum(1 for x in combined_items if x.get("source") in ("tmdb_discover+iptv", "manual_override"))
 
             built = {
                 "provider": STREAMING_PROVIDERS_META[slug],
@@ -753,6 +926,46 @@ async def sincronizar_catalogo(
         enriched_vods = await asyncio.gather(*(process_movie(v) for v in vods_to_enrich))
         enriched_series = await asyncio.gather(*(process_series(s) for s in series_to_enrich))
 
+        # Amplia cobertura de streaming_providers para 100% do catálogo via Motor Invertido Discover BR + Overrides Manuais
+        if api_key and (vod_streams or series_streams):
+            try:
+                all_m_dedup, _ = _deduplicar_itens(vod_streams, vod_cat_map, "movie")
+                all_s_dedup, _ = _deduplicar_itens(series_streams if include_series else [], series_cat_map, "series")
+                m_idx, m_alt, m_pref = _construir_indices_match(all_m_dedup)
+                s_idx, s_alt, s_pref = _construir_indices_match(all_s_dedup)
+
+                discover_tasks = [
+                    buscar_discover_provedor(http_client, prov_slug, api_key, force_refresh=force_refresh)
+                    for prov_slug in TMDB_PROVIDER_IDS.keys()
+                ]
+                discover_results = await asyncio.gather(*discover_tasks, return_exceptions=True)
+
+                enriched_vod_map = {str(v["stream_id"]): v for v in enriched_vods}
+                enriched_ser_map = {str(s["series_id"]): s for s in enriched_series}
+
+                for prov_slug, disc in zip(TMDB_PROVIDER_IDS.keys(), discover_results):
+                    if isinstance(disc, Exception) or not isinstance(disc, dict):
+                        continue
+                    for hit in _cruzar_discover_com_indice(disc.get("movie", []), m_idx, m_alt, m_pref):
+                        streaming_providers[prov_slug].append(str(hit["id"]))
+                        ev = enriched_vod_map.get(str(hit["id"]))
+                        if ev and prov_slug not in ev["providers"]:
+                            ev["providers"].append(prov_slug)
+                    for hit in _cruzar_discover_com_indice(disc.get("tv", []), s_idx, s_alt, s_pref):
+                        streaming_providers[prov_slug].append(str(hit["id"]))
+                        es = enriched_ser_map.get(str(hit["id"]))
+                        if es and prov_slug not in es["providers"]:
+                            es["providers"].append(prov_slug)
+            except Exception as exc:
+                logger.debug(f"Discover global no sync ignorado com segurança: {exc}")
+
+        for ov in cache_module.cache_instance.list_manual_matches():
+            oid = str(ov.get("item_id") or "")
+            for prov_slug in (ov.get("providers") or []):
+                ps = str(prov_slug).strip().lower()
+                if ps in streaming_providers and oid:
+                    streaming_providers[ps].append(oid)
+
         for p in streaming_providers:
             streaming_providers[p] = sorted(list(set(streaming_providers[p])))
 
@@ -791,3 +1004,290 @@ async def sincronizar_catalogo(
 
     async with httpx.AsyncClient(timeout=60.0) as local_client:
         return await _process(local_client)
+
+
+async def executar_match_streaming(
+    req: StreamingBatchMatchRequest,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Any]:
+    """
+    Executa match completo sob demanda (POST /api/v1/streaming/match):
+    - Modo A ('client_items'): recebe `req.items` enviados manualmente pelo cliente
+      e devolve os IDs classificados por plataforma + metadados TMDB em uma resposta.
+    - Modo B ('iptv_catalog'): lê o catálogo do servidor IPTV configurado/cacheado.
+    """
+    start_time = time.time()
+    iptv_url = (req.iptv_url or DEFAULT_IPTV_URL).rstrip("/")
+    fallback_ip = (req.fallback_ip or DEFAULT_IPTV_FALLBACK_IP).rstrip("/") if (req.fallback_ip or DEFAULT_IPTV_FALLBACK_IP) else None
+    username = req.username or DEFAULT_USERNAME
+    password = req.password or DEFAULT_PASSWORD
+    api_key = req.tmdb_api_key or TMDB_API_KEY
+
+    valid_slugs = list(STREAMING_PROVIDERS_META.keys())
+    target_providers = [
+        p.strip().lower() for p in (req.providers or valid_slugs)
+        if isinstance(p, str) and p.strip().lower() in STREAMING_PROVIDERS_META
+    ] or valid_slugs
+
+    async def _run(http_client: httpx.AsyncClient) -> Dict[str, Any]:
+        if req.items is not None:
+            source_mode = "client_items"
+            movies_list, series_list = _normalizar_itens_cliente(req.items)
+            m_idx, m_alt, m_pref = _construir_indices_match(movies_list)
+            s_idx, s_alt, s_pref = _construir_indices_match(series_list)
+            movies_by_id = {m["id"]: m for m in movies_list}
+            series_by_id = {s["id"]: s for s in series_list}
+        else:
+            source_mode = "iptv_catalog"
+            snap = await _obter_catalogo_iptv_cacheado(
+                http_client,
+                iptv_url=iptv_url,
+                fallback_ip=fallback_ip,
+                username=username,
+                password=password,
+                force_refresh=bool(req.force_refresh),
+            )
+            movies_list = snap["movies"]
+            series_list = snap["series"]
+            m_idx = snap["movies_index"]
+            m_alt = snap.get("movies_alt_index")
+            m_pref = snap.get("movies_prefix_index")
+            s_idx = snap["series_index"]
+            s_alt = snap.get("series_alt_index")
+            s_pref = snap.get("series_prefix_index")
+            movies_by_id = snap.get("movies_by_id", {})
+            series_by_id = snap.get("series_by_id", {})
+
+        discover_by_provider: Dict[str, Dict[str, Any]] = {p: {"movie": [], "tv": []} for p in target_providers}
+        if req.use_tmdb_discover and api_key:
+            disc_batches = await asyncio.gather(
+                *[
+                    buscar_discover_provedor(
+                        http_client,
+                        provider_slug=p,
+                        api_key=api_key,
+                        pages=DISCOVER_PAGES_PER_PROVIDER,
+                        force_refresh=bool(req.force_refresh),
+                    )
+                    for p in target_providers
+                ],
+                return_exceptions=True,
+            )
+            for p, res in zip(target_providers, disc_batches):
+                if isinstance(res, dict):
+                    discover_by_provider[p] = res
+
+        streaming_providers: Dict[str, List[str]] = {}
+        by_provider_stats: Dict[str, Dict[str, int]] = {}
+        matched_items_by_uid: Dict[str, Dict[str, Any]] = {}
+
+        for prov in target_providers:
+            disc = discover_by_provider.get(prov, {})
+            manual_hits = _resolver_overrides_para_provedor(prov, movies_by_id, series_by_id)
+            tm_movies = _cruzar_discover_com_indice(disc.get("movie", []), m_idx, alt_index=m_alt, prefix_index=m_pref)
+            tm_series = _cruzar_discover_com_indice(disc.get("tv", []), s_idx, alt_index=s_alt, prefix_index=s_pref)
+            cat_movies = _filtrar_categorias_iptv(movies_list, prov)
+            cat_series = _filtrar_categorias_iptv(series_list, prov)
+
+            seen_prov = set()
+            prov_ids: List[str] = []
+            m_cnt = 0
+            s_cnt = 0
+            for item in manual_hits + tm_movies + tm_series + cat_movies + cat_series:
+                uid = f"{item['media_type']}:{item['id']}"
+                if uid in seen_prov:
+                    continue
+                seen_prov.add(uid)
+                prov_ids.append(str(item["id"]))
+                if item["media_type"] == "series":
+                    s_cnt += 1
+                else:
+                    m_cnt += 1
+                existing = matched_items_by_uid.get(uid)
+                if not existing:
+                    entry_copy = _clean_public_item(item)
+                    entry_copy["matched_providers"] = [prov]
+                    matched_items_by_uid[uid] = entry_copy
+                else:
+                    if prov not in existing["matched_providers"]:
+                        existing["matched_providers"].append(prov)
+                    if not existing.get("backdrop") and item.get("backdrop"):
+                        existing["backdrop"] = item["backdrop"]
+
+            streaming_providers[prov] = prov_ids
+            by_provider_stats[prov] = {"total": len(prov_ids), "movies": m_cnt, "series": s_cnt}
+
+        # Fallback por item individual no TMDB apenas se explicitamente solicitado
+        if req.use_tmdb_search_fallback and api_key and int(req.max_search_fallback or 0) > 0:
+            unmatched_pool = [
+                it for it in (movies_list + series_list)
+                if f"{it['media_type']}:{it['id']}" not in matched_items_by_uid
+            ][: max(1, min(int(req.max_search_fallback), 80))]
+            sem = asyncio.Semaphore(TMDB_CONCURRENCY_LIMIT)
+
+            async def _search_one(it: Dict[str, Any]) -> None:
+                mt_tmdb = "tv" if it["media_type"] == "series" else "movie"
+                async with sem:
+                    info = await buscar_tmdb(
+                        http_client,
+                        title=it["title"],
+                        year=it.get("year_int"),
+                        api_key=api_key,
+                        media_type=mt_tmdb,
+                        force_refresh=bool(req.force_refresh),
+                    )
+                if not info:
+                    return
+                hits_p = [p for p in info.get("providers", []) if p in streaming_providers]
+                if not hits_p:
+                    return
+                uid = f"{it['media_type']}:{it['id']}"
+                enriched = dict(it)
+                enriched["tmdb_id"] = info.get("tmdb_id")
+                enriched["source"] = "tmdb_search+iptv"
+                if info.get("backdrop"):
+                    enriched["backdrop"] = info["backdrop"]
+                if info.get("poster"):
+                    enriched["poster"] = info["poster"]
+                if info.get("overview"):
+                    enriched["overview"] = info["overview"]
+                if info.get("vote_average"):
+                    enriched["rating"] = float(info["vote_average"])
+                cleaned = _clean_public_item(enriched)
+                cleaned["matched_providers"] = []
+                for p in hits_p:
+                    if str(it["id"]) not in streaming_providers[p]:
+                        streaming_providers[p].append(str(it["id"]))
+                        by_provider_stats[p]["total"] += 1
+                        if it["media_type"] == "series":
+                            by_provider_stats[p]["series"] += 1
+                        else:
+                            by_provider_stats[p]["movies"] += 1
+                    cleaned["matched_providers"].append(p)
+                matched_items_by_uid[uid] = cleaned
+
+            await asyncio.gather(*(_search_one(u) for u in unmatched_pool))
+
+        return {
+            "status": "success",
+            "source_mode": source_mode,
+            "total_input": len(movies_list) + len(series_list),
+            "total_matched": len(matched_items_by_uid),
+            "streaming_providers": streaming_providers,
+            "by_provider_stats": by_provider_stats,
+            "matched_items": list(matched_items_by_uid.values())[:500],
+            "elapsed_seconds": round(time.time() - start_time, 2),
+        }
+
+    if client is not None:
+        return await _run(client)
+
+    async with httpx.AsyncClient(timeout=60.0) as local_client:
+        return await _run(local_client)
+
+
+async def salvar_match_manual(
+    req: ManualOverrideRequest,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Any]:
+    """
+    Salva um match manual persistente no SQLite e invalida caches dos hubs afetados
+    para que o item apareça imediatamente nas plataformas corretas.
+    """
+    mt = "series" if str(req.media_type).lower() in ("series", "tv") else "movie"
+    api_key = req.tmdb_api_key or TMDB_API_KEY
+    clean_title, extracted_year = normalizar_titulo(req.title or "")
+    target_year = req.year or extracted_year
+    providers_set = {
+        str(p).strip().lower() for p in (req.providers or [])
+        if str(p).strip().lower() in STREAMING_PROVIDERS_META
+    }
+
+    tmdb_info = None
+    if req.auto_lookup_tmdb and api_key:
+        async def _lookup(http_client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
+            if req.tmdb_id:
+                res = await buscar_tmdb_por_id(http_client, mt, int(req.tmdb_id), api_key)
+                if res:
+                    return res
+            mt_tmdb = "tv" if mt == "series" else "movie"
+            return await buscar_tmdb(
+                http_client,
+                title=clean_title or req.title,
+                year=target_year,
+                api_key=api_key,
+                media_type=mt_tmdb,
+            )
+
+        if client is not None:
+            tmdb_info = await _lookup(client)
+        else:
+            async with httpx.AsyncClient(timeout=30.0) as local_client:
+                tmdb_info = await _lookup(local_client)
+
+    if tmdb_info:
+        for p in tmdb_info.get("providers", []):
+            if p in STREAMING_PROVIDERS_META:
+                providers_set.add(p)
+
+    record = {
+        "item_id": str(req.item_id).strip(),
+        "media_type": mt,
+        "title": (tmdb_info and tmdb_info.get("title")) or clean_title or req.title,
+        "raw_title": req.raw_title or req.title,
+        "year": (tmdb_info and tmdb_info.get("year")) or target_year,
+        "providers": sorted(providers_set),
+        "tmdb_id": req.tmdb_id or (tmdb_info and tmdb_info.get("tmdb_id")),
+        "poster": req.poster or (tmdb_info and tmdb_info.get("poster")) or "",
+        "backdrop": req.backdrop or (tmdb_info and tmdb_info.get("backdrop")) or "",
+        "overview": req.overview or (tmdb_info and tmdb_info.get("overview")) or "",
+        "genre": (tmdb_info and tmdb_info.get("genre")) or "",
+        "rating": (tmdb_info and tmdb_info.get("vote_average")) or 0.0,
+        "trailer_key": (tmdb_info and tmdb_info.get("trailer_key")) or None,
+    }
+    saved = cache_module.cache_instance.set_manual_match(mt, req.item_id, record)
+
+    # Invalida apenas os hubs afetados (ou todos caso providers tenha mudado)
+    for slug in STREAMING_PROVIDERS_META.keys():
+        cache_module.cache_instance.delete_by_prefix(f"streaming_hub_v2:{slug}:")
+
+    return {
+        "status": "success",
+        "override": saved,
+        "tmdb_enriched": bool(tmdb_info),
+    }
+
+
+async def aquecer_todos_hubs(
+    req: Optional[SyncRequest] = None,
+    force_refresh: bool = False,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Any]:
+    """
+    Reconstrói todos os hubs em servidor compartilhando uma única leitura de catálogo IPTV.
+    """
+    start_time = time.time()
+    summary: Dict[str, Any] = {}
+
+    async def _warm(http_client: httpx.AsyncClient) -> None:
+        for slug in STREAMING_PROVIDERS_META.keys():
+            hub = await obter_hub_provedor(
+                provider_slug=slug,
+                req=req,
+                force_refresh=force_refresh,
+                client=http_client,
+            )
+            summary[slug] = hub.get("stats", {})
+
+    if client is not None:
+        await _warm(client)
+    else:
+        async with httpx.AsyncClient(timeout=60.0) as local_client:
+            await _warm(local_client)
+
+    return {
+        "status": "success",
+        "providers_warmed": len(summary),
+        "stats": summary,
+        "elapsed_seconds": round(time.time() - start_time, 2),
+    }

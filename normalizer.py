@@ -54,10 +54,32 @@ def normalizar_titulo(raw_name: str) -> Tuple[str, Optional[int]]:
     return limpo, ano
 
 
+_ROMAN_PATTERNS = (
+    (re.compile(r"\bviii\b", re.IGNORECASE), "8"),
+    (re.compile(r"\bvii\b", re.IGNORECASE), "7"),
+    (re.compile(r"\bvi\b", re.IGNORECASE), "6"),
+    (re.compile(r"\biii\b", re.IGNORECASE), "3"),
+    (re.compile(r"\bii\b", re.IGNORECASE), "2"),
+    (re.compile(r"\biv\b", re.IGNORECASE), "4"),
+    (re.compile(r"\bv\b", re.IGNORECASE), "5"),
+    (re.compile(r"\bix\b", re.IGNORECASE), "9"),
+    (re.compile(r"\bx\b", re.IGNORECASE), "10"),
+)
+
+_LEADING_ARTICLES_RE = re.compile(r"^(?:o|a|os|as|um|uma|uns|umas|the)\s+", re.IGNORECASE)
+
+
+def _roman_to_decimal(texto: str) -> str:
+    res = texto
+    for pat, digit in _ROMAN_PATTERNS:
+        res = pat.sub(digit, res)
+    return res
+
+
 def chave_match(texto: str) -> str:
     """
     Normaliza título para chave O(1) de cruzamento e deduplicação
-    (minúsculas, sem acentos, sem pontuação).
+    (minúsculas, sem acentos, algarismos romanos convertidos, sem pontuação).
     """
     if not texto:
         return ""
@@ -66,8 +88,77 @@ def chave_match(texto: str) -> str:
     sem_acentos = "".join(
         ch for ch in unicodedata.normalize("NFD", base.lower()) if unicodedata.category(ch) != "Mn"
     )
-    sem_acentos = sem_acentos.replace("&", " e ").replace("ß", "ss")
+    sem_acentos = _roman_to_decimal(sem_acentos.replace("&", " e ").replace("ß", "ss"))
     return re.sub(r"[^a-z0-9]+", " ", sem_acentos).strip()
+
+
+def chave_match_sem_artigo(texto: str) -> str:
+    """
+    Remove artigos iniciais ('o', 'a', 'os', 'as', 'um', 'uma', 'the')
+    de uma chave normalizada para elevar taxa de match exato IPTV <-> TMDB.
+    """
+    base = chave_match(texto)
+    if not base:
+        return ""
+    stripped = _LEADING_ARTICLES_RE.sub("", base).strip()
+    return stripped or base
+
+
+def similaridade_dice(a: str, b: str) -> float:
+    """
+    Calcula coeficiente de Sorensen-Dice por bigramas de caracteres.
+    """
+    s1 = re.sub(r"\s+", "", str(a or "").lower())
+    s2 = re.sub(r"\s+", "", str(b or "").lower())
+    if not s1 or not s2:
+        return 0.0
+    if s1 == s2:
+        return 1.0
+    if len(s1) < 2 or len(s2) < 2:
+        return 0.0
+
+    bigrams1: Dict[str, int] = {}
+    for i in range(len(s1) - 1):
+        bg = s1[i : i + 2]
+        bigrams1[bg] = bigrams1.get(bg, 0) + 1
+
+    intersection = 0
+    for i in range(len(s2) - 1):
+        bg = s2[i : i + 2]
+        cnt = bigrams1.get(bg, 0)
+        if cnt > 0:
+            intersection += 1
+            bigrams1[bg] = cnt - 1
+
+    return (2.0 * intersection) / ((len(s1) - 1) + (len(s2) - 1))
+
+
+def titulos_equivalentes(local_key: str, tmdb_key: str) -> bool:
+    """
+    Valida equivalência aproximada com trava estrita de números (evita casar
+    sequências como 'Resgate 1' com 'Resgate 2').
+    """
+    k1 = str(local_key or "").strip()
+    k2 = str(tmdb_key or "").strip()
+    if not k1 or not k2:
+        return False
+    if k1 == k2:
+        return True
+
+    nums1 = re.findall(r"\d+", k1)
+    nums2 = re.findall(r"\d+", k2)
+    if (nums1 or nums2) and "".join(nums1) != "".join(nums2):
+        return False
+
+    if similaridade_dice(k1, k2) >= 0.85:
+        return True
+
+    if k1 in k2 or k2 in k1:
+        ratio = min(len(k1), len(k2)) / max(len(k1), len(k2))
+        if ratio >= 0.80:
+            return True
+
+    return False
 
 
 def extrair_qualidade_audio(raw_name: str) -> Dict[str, object]:

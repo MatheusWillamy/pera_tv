@@ -147,6 +147,7 @@ REGEX_CATEGORIA_FALLBACK = {
 # Regras de rejeição negativa para evitar falsos positivos em títulos
 REGEX_CATEGORIA_REJEICAO = {
     "hbo": re.compile(r"\b(mad\s*max|kurt\s*warner|max\s*payne|maximum|climax)\b", re.I),
+    "disney": re.compile(r"\b(battle\s+star\s+wars|star\s+wars\s+parody|spaceballs)\b", re.I),
     "prime": re.compile(r"\b(optimus\s*prime|prime\s*time|primeira|amaz[oô]nia|amazonas)\b", re.I),
     "apple": re.compile(r"\b(apple\s*pie|big\s*apple)\b", re.I),
     "globoplay": re.compile(r"\b(globo\s*da\s*morte)\b", re.I),

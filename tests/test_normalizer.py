@@ -3,8 +3,12 @@ Testes unitários para o módulo normalizer.py.
 """
 from normalizer import (
     calcular_rating_5based,
+    chave_match,
+    chave_match_sem_artigo,
     detectar_provedores_heuristica,
+    extrair_qualidade_audio,
     normalizar_titulo,
+    titulos_equivalentes,
 )
 
 
@@ -82,3 +86,27 @@ def test_anti_falso_positivo_hbo_kurt_warner():
 def test_anti_falso_positivo_mad_max_e_optimus_prime():
     assert "hbo" not in detectar_provedores_heuristica("Mad Max: Estrada da Fúria (2015)", "FILMES | AÇÃO")
     assert "prime" not in detectar_provedores_heuristica("Optimus Prime: A Origem", "FILMES | AÇÃO")
+    assert "disney" not in detectar_provedores_heuristica("Battle Star Wars (2020) [HD]", "FILMES | FICÇÃO")
+
+
+def test_chave_match_romanos_artigos_e_fuzzy_trava_numerica():
+    assert chave_match("Velozes e Furiosos X (2023)") == chave_match("Velozes e Furiosos 10")
+    assert chave_match_sem_artigo("Os Vingadores") == chave_match_sem_artigo("Vingadores")
+    assert titulos_equivalentes(chave_match("Vingadores Ultimato"), chave_match("Vingadores: Ultimato"))
+    # Trava numérica impede casar Resgate 1 com Resgate 2
+    assert not titulos_equivalentes(chave_match("Resgate 1"), chave_match("Resgate 2"))
+
+
+def test_extrair_qualidade_audio_legendado_e_dublado():
+    leg = extrair_qualidade_audio("Vingadores (2019) [FHD] [LEG]")
+    assert leg["quality"] == "FHD"
+    assert leg["is_legendado"] is True
+    assert leg["audio"] == "LEGENDADO"
+
+    leg_short = extrair_qualidade_audio("Interestelar (2014) [L]")
+    assert leg_short["is_legendado"] is True
+
+    dub = extrair_qualidade_audio("Duna (2021) [4K DUBLADO]")
+    assert dub["quality"] == "4K"
+    assert dub["is_legendado"] is False
+    assert dub["audio"] == "DUBLADO"

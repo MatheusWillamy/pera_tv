@@ -20,7 +20,7 @@ class SyncRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "pera-tv-api"
-    version: str = "2.1.0"
+    version: str = "2.2.0"
 
 
 class CatalogMetrics(BaseModel):
@@ -55,6 +55,7 @@ class StreamingHubItem(BaseModel):
     rating: float = 0.0
     quality: str = "HD"
     audio: str = ""
+    is_legendado: bool = False
     poster: str = ""
     backdrop: str = ""
     overview: str = ""
@@ -65,7 +66,7 @@ class StreamingHubItem(BaseModel):
     category_name: str = ""
     tmdb_id: Optional[int] = None
     trailer_key: Optional[str] = None
-    source: str = "iptv"  # "tmdb_discover+iptv" | "iptv_category"
+    source: str = "iptv"  # "tmdb_discover+iptv" | "iptv_category" | "manual_override"
     versions_count: int = 1
 
 
@@ -84,3 +85,43 @@ class StreamingHubsSummaryResponse(BaseModel):
     status: str = "success"
     generated_at: int
     providers: List[Dict[str, Any]]
+
+
+class ManualMatchItemInput(BaseModel):
+    id: str
+    name: str
+    media_type: str = "movie"
+    category_name: str = ""
+    year: Optional[str] = None
+    poster: str = ""
+    rating: Optional[Any] = None
+    container_extension: str = "mp4"
+
+
+class StreamingBatchMatchRequest(BaseModel):
+    items: Optional[List[ManualMatchItemInput]] = None
+    providers: Optional[List[str]] = None
+    use_tmdb_discover: bool = True
+    use_tmdb_search_fallback: bool = False
+    max_search_fallback: int = 30
+    force_refresh: bool = False
+    iptv_url: Optional[str] = None
+    fallback_ip: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    tmdb_api_key: Optional[str] = None
+
+
+class ManualOverrideRequest(BaseModel):
+    item_id: str
+    media_type: str = "movie"
+    title: str
+    year: Optional[int] = None
+    providers: List[str] = []
+    tmdb_id: Optional[int] = None
+    auto_lookup_tmdb: bool = True
+    tmdb_api_key: Optional[str] = None
+    raw_title: Optional[str] = None
+    poster: Optional[str] = None
+    backdrop: Optional[str] = None
+    overview: Optional[str] = None

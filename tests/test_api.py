@@ -22,7 +22,7 @@ def test_health_endpoint(client):
     assert data == {
         "status": "ok",
         "service": "pera-tv-api",
-        "version": "2.1.0",
+        "version": "2.2.0",
     }
 
 
@@ -264,3 +264,98 @@ def test_streaming_hub_hbo_dedup_and_discover_match(client):
         assert d2["cached"] is True
         assert len(d2["shelves"]["movies"]) == 0
         assert len(d2["shelves"]["series"]) == 1
+
+
+def test_streaming_batch_match_with_client_items_and_legendado(client):
+    mock_discover_netflix = {
+        "movie": [
+            {
+                "tmdb_id": 697843,
+                "media_type": "movie",
+                "title": "Resgate 2",
+                "original_title": "Extraction 2",
+                "overview": "Tyler Rake retorna.",
+                "poster": "https://image.tmdb.org/t/p/w342/ext2.jpg",
+                "backdrop": "https://image.tmdb.org/t/p/w780/ext2_bg.jpg",
+                "vote_average": 7.5,
+                "vote_count": 5000,
+                "popularity": 120.0,
+                "year": 2023,
+                "genre": "Ação",
+            }
+        ],
+        "tv": [],
+    }
+
+    with patch("catalog.buscar_discover_provedor", new=AsyncMock(return_value=mock_discover_netflix)):
+        payload = {
+            "providers": ["netflix", "disney"],
+            "use_tmdb_discover": True,
+            "items": [
+                {"id": "501", "name": "Resgate 2 (2023) [FHD] [LEG]", "media_type": "movie", "category_name": "FILMES | ACAO"},
+                {"id": "502", "name": "Battle Star Wars (2020) [HD]", "media_type": "movie", "category_name": "FILMES | FICCAO"},
+            ],
+        }
+        res = client.post("/api/v1/streaming/match", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["source_mode"] == "client_items"
+        assert "501" in data["streaming_providers"]["netflix"]
+        assert "502" not in data["streaming_providers"]["disney"]
+        matched_501 = next(x for x in data["matched_items"] if x["id"] == "501")
+        assert matched_501["is_legendado"] is True
+        assert matched_501["audio"] == "LEGENDADO"
+
+
+def test_manual_override_crud_and_reflection_in_hub(client):
+    from catalog import clear_memory_snapshot
+    clear_memory_snapshot()
+
+    override_req = {
+        "item_id": "9988",
+        "media_type": "movie",
+        "title": "Oppenheimer",
+        "year": 2023,
+        "providers": ["prime"],
+        "tmdb_id": 872585,
+        "auto_lookup_tmdb": False,
+        "poster": "https://image.tmdb.org/t/p/w342/opp.jpg",
+        "backdrop": "https://image.tmdb.org/t/p/w780/opp_bg.jpg",
+        "overview": "História de J. Robert Oppenheimer.",
+    }
+    save_res = client.post("/api/v1/streaming/match/manual", json=override_req)
+    assert save_res.status_code == 200
+    assert save_res.json()["override"]["item_id"] == "9988"
+
+    list_res = client.get("/api/v1/streaming/overrides?provider=prime")
+    assert list_res.status_code == 200
+    assert any(o["item_id"] == "9988" for o in list_res.json()["overrides"])
+
+    with (
+        patch("catalog.fetch_iptv_catalog", new=AsyncMock(return_value=([], [], [], []))),
+        patch("catalog.buscar_discover_provedor", new=AsyncMock(return_value={"movie": [], "tv": []})),
+        patch("catalog.buscar_trailer_youtube", new=AsyncMock(return_value="uYPbbksJxIg")),
+    ):
+        hub_res = client.get("/api/v1/streaming/hub/prime?force_refresh=true")
+        assert hub_res.status_code == 200
+        hub = hub_res.json()
+        assert hub["stats"]["movies"] == 1
+        assert hub["shelves"]["movies"][0]["id"] == "9988"
+        assert hub["shelves"]["movies"][0]["source"] == "manual_override"
+
+    del_res = client.delete("/api/v1/streaming/overrides/movie/9988")
+    assert del_res.status_code == 200
+    assert del_res.json()["deleted"] is True
+
+
+def test_warm_hubs_endpoint(client):
+    with (
+        patch("catalog.fetch_iptv_catalog", new=AsyncMock(return_value=([], [], [], []))),
+        patch("catalog.buscar_discover_provedor", new=AsyncMock(return_value={"movie": [], "tv": []})),
+    ):
+        res = client.post("/api/v1/streaming/hubs/warm?force_refresh=true")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "success"
+        assert data["providers_warmed"] == 9
+        assert "netflix" in data["stats"] and "prime" in data["stats"]

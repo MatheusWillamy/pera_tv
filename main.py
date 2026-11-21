@@ -10,10 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import cache as cache_module
-from catalog import clear_memory_snapshot, obter_hub_provedor, obter_hubs_resumo, sincronizar_catalogo
+from catalog import (
+    aquecer_todos_hubs,
+    clear_memory_snapshot,
+    executar_match_streaming,
+    obter_hub_provedor,
+    obter_hubs_resumo,
+    salvar_match_manual,
+    sincronizar_catalogo,
+)
 from iptv import IPTVAuthError, IPTVConnectionError
 from schemas import (
     HealthResponse,
+    ManualOverrideRequest,
+    StreamingBatchMatchRequest,
     StreamingHubResponse,
     StreamingHubsSummaryResponse,
     SyncCatalogResponse,
@@ -29,7 +39,7 @@ logger = logging.getLogger("pera_tv_api")
 app = FastAPI(
     title="Pera TV - IPTV TMDB Enrichment BFF",
     description="Middleware de alto desempenho para enriquecimento e categorização de IPTV com TMDB",
-    version="2.1.0",
+    version="2.2.0",
 )
 
 # ==============================================================================
@@ -70,13 +80,17 @@ async def iptv_connection_exception_handler(request: Request, exc: IPTVConnectio
 async def root():
     return {
         "service": "pera-tv-api",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "status": "online",
         "documentation": "/docs",
         "health": "/health",
         "sync_endpoint": "/api/v1/sync/catalog",
         "streaming_hubs": "/api/v1/streaming/hubs",
         "streaming_hub_detail": "/api/v1/streaming/hub/{provider}",
+        "streaming_match": "/api/v1/streaming/match",
+        "streaming_manual_match": "/api/v1/streaming/match/manual",
+        "streaming_overrides": "/api/v1/streaming/overrides",
+        "streaming_hubs_warm": "/api/v1/streaming/hubs/warm",
     }
 
 
@@ -85,7 +99,7 @@ async def health():
     return {
         "status": "ok",
         "service": "pera-tv-api",
-        "version": "2.1.0",
+        "version": "2.2.0",
     }
 
 
@@ -160,6 +174,75 @@ async def post_streaming_hub(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Falha interna ao montar hub de streaming: {str(exc)}",
+        )
+
+
+@app.post("/api/v1/streaming/match", tags=["Streaming Matching"])
+async def post_streaming_match(req: StreamingBatchMatchRequest):
+    """
+    Executa o match automático e manual de dados enviados pelo cliente (ou do servidor IPTV)
+    contra TMDB Discover BR + heurística anti-falso-positivo + overrides persistidos.
+    """
+    try:
+        return await executar_match_streaming(req)
+    except (IPTVAuthError, IPTVConnectionError):
+        raise
+    except Exception as exc:
+        logger.exception(f"Erro no match de streaming: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Falha interna ao executar match de streaming: {str(exc)}",
+        )
+
+
+@app.post("/api/v1/streaming/match/manual", tags=["Streaming Matching"])
+async def post_streaming_manual_match(req: ManualOverrideRequest):
+    """
+    Salva um match manual permanente no SQLite para um filme/série específico,
+    enriquecendo opcionalmente pelo TMDB ID ou Título+Ano e atualizando os hubs.
+    """
+    try:
+        return await salvar_match_manual(req)
+    except Exception as exc:
+        logger.exception(f"Erro ao salvar match manual: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Falha ao salvar match manual: {str(exc)}",
+        )
+
+
+@app.get("/api/v1/streaming/overrides", tags=["Streaming Matching"])
+async def list_streaming_overrides(provider: Optional[str] = Query(None)):
+    """Lista os matches manuais persistidos no banco SQLite."""
+    items = cache_module.cache_instance.list_manual_matches(provider=provider)
+    return {"status": "success", "total": len(items), "overrides": items}
+
+
+@app.delete("/api/v1/streaming/overrides/{media_type}/{item_id}", tags=["Streaming Matching"])
+async def delete_streaming_override(media_type: str, item_id: str):
+    """Remove um match manual persistido e limpa cache dos hubs afetados."""
+    removed = cache_module.cache_instance.delete_manual_match(media_type, item_id)
+    if removed:
+        cache_module.cache_instance.delete_by_prefix("streaming_hub_v2:")
+    return {"status": "success", "deleted": removed}
+
+
+@app.post("/api/v1/streaming/hubs/warm", tags=["Streaming Hubs"])
+async def warm_all_streaming_hubs(
+    req: Optional[SyncRequest] = None,
+    force_refresh: bool = Query(False),
+):
+    """Aquece/reconstrói todos os 9 hubs compartilhando um único download do IPTV."""
+    try:
+        eff_force = force_refresh or bool(req and req.force_refresh)
+        return await aquecer_todos_hubs(req=req, force_refresh=eff_force)
+    except (IPTVAuthError, IPTVConnectionError):
+        raise
+    except Exception as exc:
+        logger.exception(f"Erro ao aquecer hubs de streaming: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Falha ao aquecer hubs de streaming: {str(exc)}",
         )
 
 

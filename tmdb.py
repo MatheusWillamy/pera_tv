@@ -383,3 +383,65 @@ async def buscar_tmdb(
     except Exception as exc:
         logger.debug(f"Erro na consulta TMDB para '{title}': {exc}")
         return None
+
+
+async def buscar_tmdb_por_id(
+    client: httpx.AsyncClient,
+    media_type: str,
+    tmdb_id: int,
+    api_key: str,
+    force_refresh: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Busca metadados completos no TMDB diretamente pelo tmdb_id ('movie' ou 'tv'),
+    incluindo Watch Providers BR e trailer YouTube.
+    """
+    if not tmdb_id or not api_key:
+        return None
+
+    mt = "tv" if str(media_type).lower() in ("tv", "series") else "movie"
+    cache_key = f"tmdb_id:{mt}:{int(tmdb_id)}"
+    if not force_refresh:
+        cached = cache_module.cache_instance.get(cache_key)
+        if cached is not None:
+            return cached
+
+    endpoint = f"{TMDB_BASE}/{mt}/{int(tmdb_id)}"
+    params = {"api_key": api_key, "language": "pt-BR"}
+    try:
+        r = await client.get(endpoint, params=params, timeout=TMDB_REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            return None
+        info = r.json() or {}
+        if not info.get("id"):
+            return None
+
+        providers, trailer_key = await asyncio.gather(
+            buscar_watch_providers(client, mt, int(tmdb_id), api_key),
+            buscar_trailer_youtube(client, mt, int(tmdb_id), api_key, force_refresh=force_refresh),
+        )
+
+        poster_path = info.get("poster_path")
+        backdrop_path = info.get("backdrop_path")
+        date_str = str(info.get("release_date") or info.get("first_air_date") or "")
+        year = int(date_str[:4]) if len(date_str) >= 4 and date_str[:4].isdigit() else None
+        genres_list = [str(g.get("name")) for g in (info.get("genres") or []) if isinstance(g, dict) and g.get("name")]
+
+        data = {
+            "tmdb_id": int(info["id"]),
+            "title": info.get("title") or info.get("name") or "",
+            "original_title": info.get("original_title") or info.get("original_name") or "",
+            "overview": info.get("overview") or "",
+            "poster": f"{TMDB_IMG_BASE}/w342{poster_path}" if poster_path else None,
+            "backdrop": f"{TMDB_IMG_BASE}/w780{backdrop_path}" if backdrop_path else None,
+            "vote_average": round(float(info.get("vote_average") or 0.0), 1),
+            "year": year,
+            "genre": ", ".join(genres_list[:3]),
+            "providers": providers,
+            "trailer_key": trailer_key,
+        }
+        cache_module.cache_instance.set(cache_key, data)
+        return data
+    except Exception as exc:
+        logger.debug(f"Erro ao buscar TMDB por ID {mt}/{tmdb_id}: {exc}")
+        return None
